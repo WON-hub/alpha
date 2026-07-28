@@ -1,0 +1,6 @@
+/* Prevent the empty detail modal from overriding the HTML hidden attribute. */
+[hidden],
+.modal[hidden] {
+  display: none !important;
+}
+

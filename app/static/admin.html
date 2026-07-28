@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>관리자 · 제휴식당 어디지?</title>
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/css/admin.css?v=20260728-2" />
+  </head>
+  <body>
+    <div id="admin-root">
+      <aside class="sidebar">
+        <a href="/" class="side-brand"><span>W</span><strong>제휴식당 어디지?</strong></a>
+        <div class="side-label">ADMIN CONSOLE</div>
+        <nav>
+          <button data-view="dashboard" class="side-nav active">▦ <span>대시보드</span></button>
+          <button data-view="new" class="side-nav">＋ <span>신규 제휴 등록</span></button>
+          <button data-view="partnerships" class="side-nav">▤ <span>제휴 정보 관리</span></button>
+          <button data-view="import" class="side-nav">⇧ <span>데이터 일괄 등록</span></button>
+          <button data-view="analytics" class="side-nav">◒ <span>이용 현황 분석</span></button>
+          <button data-view="reports" class="side-nav">⚑ <span>리뷰 및 신고 관리</span></button>
+        </nav>
+        <a href="/" class="back-link">← 사용자 화면</a>
+      </aside>
+      <main class="admin-main">
+        <header class="admin-header">
+          <div><div class="eyebrow">ADMIN CONSOLE</div><h1 id="page-title">대시보드</h1></div>
+          <div class="header-actions"><span class="live-dot">● 운영 중</span><button id="logout" class="outline-button">로그아웃</button></div>
+        </header>
+        <div id="login-gate" class="login-gate">
+          <div class="login-card">
+            <div class="login-mark">W</div>
+            <h2>관리자 로그인</h2>
+            <p>등록된 관리자 비밀번호로 접속하세요.</p>
+            <form id="login-form">
+              <label for="admin-password">관리자 비밀번호</label>
+              <input id="admin-password" type="password" autocomplete="current-password" required />
+              <button class="primary-button" type="submit">로그인</button>
+            </form>
+            <small>.env의 ADMIN_PASSWORD_HASH 값을 사용합니다.</small>
+          </div>
+        </div>
+        <div id="admin-content" hidden>
+          <section id="view-dashboard" class="admin-view"></section>
+          <section id="view-new" class="admin-view" hidden></section>
+          <section id="view-partnerships" class="admin-view" hidden></section>
+          <section id="view-import" class="admin-view" hidden></section>
+          <section id="view-analytics" class="admin-view" hidden></section>
+          <section id="view-reports" class="admin-view" hidden></section>
+        </div>
+      </main>
+    </div>
+    <div id="admin-toast" class="admin-toast" role="status" aria-live="polite"></div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script type="module" src="/static/js/admin.js?v=20260728-4"></script>
+  </body>
+</html>

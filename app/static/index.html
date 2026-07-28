@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>제휴식당 어디지?</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/static/css/app.css?v=20260728" />
+    <link rel="stylesheet" href="/static/css/fixes.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/"><span class="brand-mark">W</span><span>제휴식당 어디지?</span></a>
+      <nav class="category-nav" aria-label="카테고리">
+        <button class="nav-filter active" data-category="전체">전체보기</button>
+        <button class="nav-filter" data-category="식사류">식사류</button>
+        <button class="nav-filter" data-category="카페/디저트">카페/디저트</button>
+        <button class="nav-filter" data-category="주점">주점</button>
+        <button class="nav-filter" data-category="기타">기타</button>
+      </nav>
+      <div class="top-actions">
+        <label class="distance-quick">최대 <select id="quick-distance"><option value="500">500m</option><option value="1000">1km</option><option value="1500" selected>1.5km</option><option value="3000">3km</option></select></label>
+        <button id="google-login" class="google-login" type="button">Google 로그인</button>
+        <a class="admin-link" href="/admin" aria-label="관리자 페이지">⚙</a>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="condition-panel panel">
+        <div class="section-kicker">CAMPUS DEAL FINDER</div>
+        <h1>오늘은 어디서<br /><span>가장 이득일까?</span></h1>
+        <p class="subcopy">내 소속과 동행자, 예산을 바탕으로 지금 적용 가능한 제휴를 계산해요.</p>
+
+        <div class="location-box">
+          <div>
+            <strong>현재 위치</strong>
+            <p id="location-status">광운대학교 중심 위치를 사용 중이에요.</p>
+          </div>
+          <button id="use-location" class="button button-light">위치 사용</button>
+        </div>
+
+        <form id="condition-form">
+          <div class="field-group">
+            <label for="my-affiliation">내 소속</label>
+            <select id="my-affiliation" required><option value="">소속을 선택하세요</option></select>
+          </div>
+          <div class="field-group">
+            <div class="field-heading"><label>동행자</label><button type="button" id="add-companion" class="text-button">+ 추가</button></div>
+            <div id="companions" class="companions"></div>
+          </div>
+          <div class="form-grid">
+            <div class="field-group"><label for="budget">1인당 예상 결제</label><div class="input-suffix"><input id="budget" type="number" min="0" step="1000" value="12000" required /><span>원</span></div></div>
+            <div class="field-group"><label for="distance">최대 이동 거리</label><select id="distance"><option value="500">500m · 약 7분</option><option value="1000">1km · 약 13분</option><option value="1500" selected>1.5km · 약 20분</option><option value="3000">3km · 약 40분</option></select></div>
+          </div>
+          <div class="field-group"><label for="payment">결제 방식</label><select id="payment"><option value="">상관없음</option><option value="카드">카드</option><option value="현금">현금</option><option value="간편결제">간편결제</option></select></div>
+          <div class="summary-box"><div><span>전체 인원</span><strong id="total-people">1명</strong></div><div><span>예상 총 결제</span><strong id="total-budget">12,000원</strong></div></div>
+          <button class="button button-primary calculate-button" type="submit"><span>✦</span> 최적 혜택 계산하기</button>
+        </form>
+        <p class="privacy-note">로그인 없이 이용 가능 · 위치는 추천 계산에만 사용돼요.</p>
+      </section>
+
+      <section class="results-panel panel">
+        <div class="results-header"><div><div class="section-kicker">RECOMMENDATIONS</div><h2>지금 가장 잘 맞는 곳</h2></div><div class="sort-wrap"><label for="sort">정렬</label><select id="sort"><option value="cdi">종합 추천순</option><option value="benefit">혜택순</option><option value="distance">거리순</option><option value="rating">만족도순</option></select></div></div>
+        <div id="default-location-banner" class="notice-banner">📍 GPS를 허용하지 않아 광운대학교 중심 좌표로 계산하고 있어요.</div>
+        <div id="result-state" class="empty-state"><div class="empty-icon">✦</div><h3>조건을 고르면 추천을 시작해요</h3><p>내 소속과 동행자 정보를 입력하고<br />최적 혜택 계산하기를 눌러보세요.</p></div>
+        <div id="results-list" class="results-list" hidden></div>
+      </section>
+
+      <aside class="map-panel panel"><div class="map-heading"><div><div class="section-kicker">NEARBY MAP</div><h2>추천 위치</h2></div><span id="map-caption">직선거리 기준 예상</span></div><div id="map"></div><div class="map-legend"><span><i class="legend-dot user-dot"></i> 내 위치</span><span><i class="legend-dot rank-dot">1</i> 추천 업체</span></div></aside>
+    </main>
+
+    <div id="detail-modal" class="modal" hidden><div class="modal-backdrop" data-close-modal></div><div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button class="modal-close" data-close-modal aria-label="닫기">×</button><div id="modal-content"></div></div></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script type="module" src="/static/js/app.js"></script>
+  </body>
+</html>
