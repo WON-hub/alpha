@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, init_db
@@ -14,7 +14,7 @@ COLLEGE_DEPARTMENTS = {
     "인공지능융합대학": ["컴퓨터정보공학부", "소프트웨어학부", "정보융합학부", "로봇학부", "지능형로봇학과"],
     "공과대학": ["건축학과", "건축공학과", "화학공학과", "환경공학과"],
     "자연과학대학": ["수학과", "전자바이오물리학과", "화학과", "스포츠융합과학과"],
-    "인문사회과학대학": ["국어국문학과", "영어산업학과", "미디어커뮤니케이션학부", "산업심리학과", "동북아문화산업학부"],
+    "인문사회대학": ["국어국문학과", "영어산업학과", "미디어커뮤니케이션학부", "산업심리학과", "동북아문화산업학부"],
     "정책법학대학": ["행정학과", "법학부", "국제학부", "자산관리학과"],
     "경영대학": ["경영학부", "국제통상학부"],
     "참빛인재대학": ["금융부동산법무학과", "게임콘텐츠학과", "스마트전기전자학과", "스포츠상담재활학과"],
@@ -96,6 +96,14 @@ def _reconcile_legacy_affiliations(db: Session, university: Affiliation, college
             child.parent_id = university.id
         db.delete(legacy)
 
+    legacy_college = db.scalar(select(Affiliation).where(Affiliation.name == "인문사회과학대학", Affiliation.type == "college"))
+    current_college = colleges.get("인문사회대학")
+    if legacy_college and current_college and legacy_college.id != current_college.id:
+        _move_partnerships(db, legacy_college, current_college)
+        for child in db.scalars(select(Affiliation).where(Affiliation.parent_id == legacy_college.id)).all():
+            child.parent_id = current_college.id
+        db.delete(legacy_college)
+
     replacements = {
         ("정책법학대학", "법학과"): "법학부",
         ("인공지능융합대학", "AI전공"): "컴퓨터정보공학부",
@@ -108,8 +116,17 @@ def _reconcile_legacy_affiliations(db: Session, university: Affiliation, college
     db.flush()
 
 
+def _remove_demo_data(db: Session) -> None:
+    demo_restaurants = db.scalars(select(Restaurant).where(Restaurant.name.like("DEMO %"))).all()
+    demo_restaurant_ids = [restaurant.id for restaurant in demo_restaurants]
+    if demo_restaurant_ids:
+        db.execute(delete(Restaurant).where(Restaurant.id.in_(demo_restaurant_ids)))
+    db.execute(delete(Partnership).where(Partnership.source == "DEMO"))
+
+
 def seed_database(db: Session) -> None:
     today = date.today()
+    _remove_demo_data(db)
     university = db.scalar(select(Affiliation).where(Affiliation.name == "광운대학교", Affiliation.type == "university"))
     if not university:
         legacy_university = db.scalar(select(Affiliation).where(Affiliation.type == "university", Affiliation.name.like("%광운대학교%")))
@@ -133,31 +150,9 @@ def seed_database(db: Session) -> None:
             departments_by_name[department_name] = department
     db.flush()
     _reconcile_legacy_affiliations(db, university, colleges_by_name, departments_by_name)
-
-    for index, (name, category) in enumerate(RESTAURANT_NAMES):
-        full_name = f"DEMO {name}"
-        restaurant = db.scalar(select(Restaurant).where(Restaurant.name == full_name))
-        if not restaurant:
-            row = index // 5
-            restaurant = Restaurant(
-                name=full_name,
-                category=category,
-                address=f"서울 노원구 광운로 {20 + index}",
-                latitude=37.6158 + (index % 8) * 0.00105,
-                longitude=127.0568 + (index % 7) * 0.00105,
-                phone=f"02-0000-{1000 + index:04d}",
-                opening_hours="11:00–22:00" if category != "주점" else "17:00–02:00",
-                menu_summary="학생 추천 메뉴 · DEMO 샘플 데이터",
-                rating_average=round(4.0 + (index % 9) / 10, 1) if index % 6 else 0,
-                review_count=0 if index % 6 == 0 else 3 + index % 8,
-                status="active",
-            )
-            db.add(restaurant)
-            db.flush()
-        _demo_partnership(db, restaurant, departments[index % len(departments)], index, today)
-        _demo_partnership(db, restaurant, colleges[(index + 3) % len(colleges)], index + 1, today)
-        if index % 5 == 0:
-            _demo_partnership(db, restaurant, university, index + 2, today)
+    # Keep the existing college-type constraint compatible with deployed Supabase projects.
+    all_scope = _affiliation(db, "전체", "college", university.id)
+    _move_partnerships(db, university, all_scope)
 
     db.commit()
     db.close()
@@ -166,4 +161,4 @@ def seed_database(db: Session) -> None:
 if __name__ == "__main__":
     init_db()
     seed_database(SessionLocal())
-    print("DEMO sample data seeded.")
+    print("Affiliations reconciled; demo data removed.")

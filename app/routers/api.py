@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from io import BytesIO
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
@@ -16,11 +17,12 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import Affiliation, Favorite, Partnership, Report, Restaurant, Review, UsageEvent, User
 from app.schemas import AuthSync, RecommendationRequest, ReportCreate, RestaurantDetail, ReviewCreate, UsageEventCreate
-from app.services.geocoding import geocode_address
 from app.services.import_service import commit_rows, parse_upload, preview_rows
-from app.services.recommendation import recommend
+from app.services.ai import AIConfigurationError, AIServiceError, analyze_benefit, generate_recommendation_reason, generate_store_summary
+from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, search_places
+from app.services.recommendation import benefit_conditions, benefit_items, benefit_score_components, benefit_text, bayesian_satisfaction, public_benefit_label, recommend
 from app.security import get_admin_session, verify_password, create_admin_session, revoke_admin_session
-from app.schemas import AdminLogin, ImportCommit, PartnershipBulkApprove, PartnershipCreate, PartnershipUpdate, ReportUpdate
+from app.schemas import AdminLogin, BenefitAnalyzeRequest, ImportCommit, PartnershipBulkApprove, PartnershipCreate, PartnershipUpdate, ReportUpdate
 
 
 router = APIRouter()
@@ -45,6 +47,61 @@ def _affiliation_tree(db: Session) -> list[dict]:
 def _require_admin(request: Request, db: Session) -> None:
     if not get_admin_session(db, request.cookies.get("admin_session")):
         raise HTTPException(status_code=401, detail="관리자 로그인이 필요합니다.")
+
+
+def _json_object(value: str) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _analysis_value(analysis: dict, snake_key: str, camel_key: str, default=None):
+    value = analysis.get(camel_key, analysis.get(snake_key, default))
+    return default if value is None else value
+
+
+def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
+    """Apply AI fields to legacy scoring columns while retaining the full JSON."""
+    rate = _analysis_value(analysis, "discount_rate", "discountRate")
+    amount = _analysis_value(analysis, "fixed_discount", "discountAmount")
+    free_item = _analysis_value(analysis, "service_item", "freeItem", "")
+    minimum_order = _analysis_value(analysis, "min_order_amount", "minimumOrder")
+    required_people = _analysis_value(analysis, "min_people", "requiredPeople")
+    conditions = _analysis_value(analysis, "conditions", "conditions", []) or []
+    student_verification = bool(_analysis_value(analysis, "student_verification", "studentVerification", False))
+
+    def number(value, default=0):
+        try:
+            return float(value or default)
+        except (TypeError, ValueError):
+            return default
+
+    if rate not in (None, ""):
+        partnership.discount_rate = number(rate)
+    if amount not in (None, ""):
+        partnership.fixed_discount = int(number(amount))
+    if free_item not in (None, ""):
+        partnership.service_item = str(free_item)
+    if minimum_order not in (None, ""):
+        partnership.min_order_amount = int(number(minimum_order))
+    if required_people not in (None, ""):
+        partnership.min_people = max(1, int(number(required_people, 1)))
+    if conditions:
+        partnership.eligibility_description = " / ".join(str(item) for item in conditions)
+    if student_verification and not partnership.verification_method:
+        partnership.verification_method = "학생증 제시"
+
+    benefit_type = str(_analysis_value(analysis, "benefit_type", "benefitType", "discount") or "discount").lower()
+    if rate not in (None, "", 0):
+        partnership.benefit_type = "percentage"
+    elif amount not in (None, "", 0):
+        partnership.benefit_type = "fixed"
+    elif free_item:
+        partnership.benefit_type = "service"
+    elif benefit_type in {"percentage", "fixed", "service", "discount"}:
+        partnership.benefit_type = benefit_type
 
 
 @router.get("/health")
@@ -152,11 +209,11 @@ def restaurant_detail(restaurant_id: int, db: Session = Depends(get_db)) -> Rest
     if not restaurant:
         raise HTTPException(status_code=404, detail="업체를 찾을 수 없습니다.")
     partnerships = [
-        {"id": p.id, "affiliation": p.affiliation.name, "benefit_label": f"{p.discount_rate:g}% 할인" if p.discount_rate else (f"{p.fixed_discount:,}원 할인" if p.fixed_discount else f"{p.service_item} 제공"), "application_scope": p.application_scope, "start_date": p.start_date, "end_date": p.end_date, "verification_method": p.verification_method, "status": p.status}
+        {"id": p.id, "affiliation": p.affiliation.name, "benefit_text": p.benefit_text, "benefit_label": public_benefit_label(p), "benefit_items": benefit_items(p), "benefit_conditions": benefit_conditions(p), "application_scope": p.application_scope, "start_date": p.start_date, "end_date": p.end_date, "verification_method": p.verification_method, "status": p.status}
         for p in restaurant.partnerships
     ]
     reviews = [{"id": r.id, "rating": r.rating, "content": r.content, "author_name": r.author_name, "admin_reply": r.admin_reply, "created_at": r.created_at} for r in restaurant.reviews if not r.is_hidden]
-    return RestaurantDetail(id=restaurant.id, name=restaurant.name, category=restaurant.category, address=restaurant.address, latitude=restaurant.latitude, longitude=restaurant.longitude, phone=restaurant.phone, opening_hours=restaurant.opening_hours, menu_summary=restaurant.menu_summary, image_url=restaurant.image_url, rating_average=restaurant.rating_average, review_count=restaurant.review_count, partnerships=partnerships, reviews=reviews)
+    return RestaurantDetail(id=restaurant.id, name=restaurant.name, category=restaurant.category, address=restaurant.address, latitude=restaurant.latitude, longitude=restaurant.longitude, phone=restaurant.phone, opening_hours=restaurant.opening_hours, menu_summary=restaurant.menu_summary, ai_store_summary=restaurant.ai_summary, image_url=restaurant.image_url, rating_average=restaurant.rating_average, review_count=restaurant.review_count, partnerships=partnerships, reviews=reviews)
 
 
 @router.post("/recommendations")
@@ -164,7 +221,20 @@ def recommendations(payload: RecommendationRequest, db: Session = Depends(get_db
     restaurants_list = db.scalars(select(Restaurant).options(joinedload(Restaurant.partnerships))).unique().all()
     affiliations_list = db.scalars(select(Affiliation)).all()
     results = recommend(payload, restaurants_list, affiliations_list)
-    return {"results": results, "used_default_location": payload.location.source == "campus_default", "location": payload.location.model_dump()}
+    ai_recommendation = None
+    if results:
+        selected = dict(secrets.choice(results))
+        results = [item for item in results if item["id"] != selected["id"]]
+        affiliation_names = [affiliation.name for affiliation in affiliations_list if affiliation.id in {group.affiliation_id for group in payload.groups}]
+        reason = f"{selected['category']} 제휴 혜택과 현재 위치에서의 거리, 이용 만족도를 함께 고려해 추천했어요."
+        try:
+            if get_settings().gemini_api_key:
+                reason = generate_recommendation_reason(selected["name"], selected["category"], selected["address"], " / ".join(selected["benefit_items"]), selected["distance_m"], selected["satisfaction_score"], affiliation_names)
+        except AIServiceError:
+            pass
+        selected["ai_recommendation_reason"] = reason
+        ai_recommendation = selected
+    return {"results": results, "ai_recommendation": ai_recommendation, "used_default_location": payload.location.source == "campus_default", "location": payload.location.model_dump()}
 
 
 @router.post("/reviews")
@@ -178,6 +248,8 @@ def create_review(payload: ReviewCreate, db: Session = Depends(get_db)) -> dict:
     reviews = db.scalars(select(Review).where(Review.restaurant_id == restaurant.id, Review.is_hidden.is_(False))).all()
     restaurant.review_count = len(reviews)
     restaurant.rating_average = round(sum(item.rating for item in reviews) / len(reviews), 2) if reviews else 0
+    for item in db.scalars(select(Restaurant)).all():
+        item.satisfaction_preprocessed_at = None
     db.commit()
     return {"ok": True, "review_id": review.id}
 
@@ -200,9 +272,10 @@ def usage_event(payload: UsageEventCreate, db: Session = Depends(get_db)) -> dic
     return {"ok": True}
 
 
-@router.get("/geocode")
+# Deprecated public geocoding route; user-facing search never calls an external provider.
 async def geocode(q: str) -> dict:
-    result = await geocode_address(q)
+    raise HTTPException(status_code=410, detail="사용자용 외부 지오코딩은 제거되었습니다. 장소 정보는 관리자 등록 시에만 검색합니다.")
+    return {"ok": False, "disabled": True}
     if not result:
         raise HTTPException(status_code=404, detail="Geocoding API 키가 없거나 주소를 찾지 못했습니다. 지도의 좌표를 직접 입력해 주세요.")
     return result
@@ -246,7 +319,7 @@ def admin_dashboard(request: Request, db: Session = Depends(get_db)) -> dict:
 
 
 def _partnership_row(partnership: Partnership) -> dict:
-    return {"id": partnership.id, "restaurant_id": partnership.restaurant_id, "restaurant_name": partnership.restaurant.name, "category": partnership.restaurant.category, "affiliation": partnership.affiliation.name, "affiliation_id": partnership.affiliation_id, "benefit_type": partnership.benefit_type, "discount_rate": partnership.discount_rate, "fixed_discount": partnership.fixed_discount, "service_item": partnership.service_item, "estimated_cash_value": partnership.estimated_cash_value, "min_order_amount": partnership.min_order_amount, "min_people": partnership.min_people, "payment_method": partnership.payment_method, "application_scope": partnership.application_scope, "verification_method": partnership.verification_method, "start_date": partnership.start_date, "end_date": partnership.end_date, "status": partnership.status, "address": partnership.restaurant.address, "latitude": partnership.restaurant.latitude, "longitude": partnership.restaurant.longitude}
+    return {"id": partnership.id, "restaurant_id": partnership.restaurant_id, "restaurant_name": partnership.restaurant.name, "category": partnership.restaurant.category, "affiliation": partnership.affiliation.name, "affiliation_id": partnership.affiliation_id, "benefit_type": partnership.benefit_type, "benefit_text": partnership.benefit_text, "benefit_ai_json": _json_object(partnership.benefit_ai_json), "benefit_display": benefit_items(partnership), "benefit_label": public_benefit_label(partnership), "discount_rate": partnership.discount_rate, "fixed_discount": partnership.fixed_discount, "service_item": partnership.service_item, "estimated_cash_value": partnership.estimated_cash_value, "min_order_amount": partnership.min_order_amount, "min_people": partnership.min_people, "payment_method": partnership.payment_method, "application_scope": partnership.application_scope, "verification_method": partnership.verification_method, "start_date": partnership.start_date, "end_date": partnership.end_date, "status": partnership.status, "address": partnership.restaurant.address, "latitude": partnership.restaurant.latitude, "longitude": partnership.restaurant.longitude, "place_id": partnership.restaurant.place_id, "place_provider": partnership.restaurant.place_provider, "benefit_base_score": partnership.benefit_base_score, "benefit_bonus_score": partnership.benefit_bonus_score, "benefit_condition_penalty": partnership.benefit_condition_penalty, "benefit_score_cached": partnership.benefit_score_cached, "benefit_preprocessed_at": partnership.benefit_preprocessed_at}
 
 
 @admin_router.get("/partnerships")
@@ -265,7 +338,7 @@ def admin_partnerships(request: Request, status: str | None = None, search: str 
 def export_partnerships(request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
     rows = admin_partnerships(request, db=db)["items"]
-    headers = ["id", "restaurant_name", "category", "affiliation", "benefit_type", "discount_rate", "fixed_discount", "start_date", "end_date", "status"]
+    headers = ["id", "restaurant_name", "category", "affiliation", "benefit_text", "benefit_type", "discount_rate", "fixed_discount", "start_date", "end_date", "status"]
     lines = [",".join(headers)] + [",".join(str(row.get(header, "")).replace(",", " ") for header in headers) for row in rows]
     content = "\ufeff" + "\n".join(lines)
     return StreamingResponse(iter([content]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=partnerships.csv"})
@@ -295,6 +368,79 @@ def bulk_approve_partnerships(payload: PartnershipBulkApprove, request: Request,
     }
 
 
+@admin_router.get("/places/search")
+async def admin_place_search(q: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """Search an external place provider only from the admin registration flow."""
+    _require_admin(request, db)
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="가게명을 입력해 주세요.")
+
+    # An exact existing name is served from our DB and never reaches an external API.
+    existing = db.scalars(select(Restaurant).where(func.lower(Restaurant.name) == query.lower())).all()
+    if existing:
+        return {
+            "cached": True,
+            "provider": "database",
+            "items": [
+                {
+                    "restaurant_id": item.id,
+                    "place_id": item.place_id,
+                    "place_provider": item.place_provider,
+                    "name": item.name,
+                    "category": item.category,
+                    "address": item.address,
+                    "latitude": item.latitude,
+                    "longitude": item.longitude,
+                    "phone": item.phone,
+                    "opening_hours": item.opening_hours,
+                    "image_url": item.image_url,
+                }
+                for item in existing
+            ],
+        }
+    try:
+        items = await search_places(query)
+    except PlaceSearchConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PlaceSearchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"cached": False, "provider": items[0]["place_provider"] if items else "", "items": items}
+
+
+@admin_router.post("/ai/analyze-benefit")
+def admin_analyze_benefit(payload: BenefitAnalyzeRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+    _require_admin(request, db)
+    if not get_settings().gemini_api_key:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY가 설정되지 않았습니다.")
+    try:
+        return {"ok": True, "analysis": analyze_benefit(payload.benefit_text)}
+    except (AIConfigurationError, AIServiceError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@admin_router.post("/places/{restaurant_id}/refresh")
+async def refresh_place(restaurant_id: int, request: Request, place_id: str | None = None, db: Session = Depends(get_db)) -> dict:
+    _require_admin(request, db)
+    restaurant = db.get(Restaurant, restaurant_id)
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="업체를 찾을 수 없습니다.")
+    try:
+        items = await search_places(restaurant.name)
+    except (PlaceSearchConfigurationError, PlaceSearchError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    selected = next((item for item in items if place_id and item["place_id"] == place_id), None) or (items[0] if items else None)
+    if not selected:
+        raise HTTPException(status_code=404, detail="장소 검색 결과가 없습니다.")
+    for key in ("name", "category", "address", "latitude", "longitude", "phone", "opening_hours", "image_url"):
+        if selected.get(key) not in (None, ""):
+            setattr(restaurant, key, selected[key])
+    restaurant.place_id = selected["place_id"]
+    restaurant.place_provider = selected["place_provider"]
+    db.commit()
+    return {"ok": True, "item": selected}
+
+
 @admin_router.post("/partnerships")
 def create_partnership(payload: PartnershipCreate, request: Request, db: Session = Depends(get_db)) -> dict:
     _require_admin(request, db)
@@ -303,14 +449,34 @@ def create_partnership(payload: PartnershipCreate, request: Request, db: Session
         if not restaurant:
             raise HTTPException(status_code=404, detail="업체를 찾을 수 없습니다.")
     else:
-        restaurant = Restaurant(name=payload.restaurant_name, category=payload.category, address=payload.address, latitude=payload.latitude, longitude=payload.longitude, phone=payload.phone, opening_hours=payload.opening_hours, menu_summary=payload.menu_summary, image_url=payload.image_url, status="active")
-        db.add(restaurant)
-        db.flush()
+        restaurant = None
+        if payload.place_id:
+            restaurant = db.scalar(select(Restaurant).where(Restaurant.place_id == payload.place_id, Restaurant.place_provider == payload.place_provider))
+        if not restaurant and payload.address:
+            restaurant = db.scalar(select(Restaurant).where(Restaurant.name == payload.restaurant_name, Restaurant.address == payload.address))
+        if not restaurant:
+            restaurant = Restaurant(name=payload.restaurant_name, category=payload.category, address=payload.address, latitude=payload.latitude, longitude=payload.longitude, phone=payload.phone, place_id=payload.place_id, place_provider=payload.place_provider, opening_hours=payload.opening_hours, menu_summary=payload.menu_summary, image_url=payload.image_url, status="active")
+            db.add(restaurant)
+            db.flush()
+    if not restaurant.ai_summary:
+        try:
+            restaurant.ai_summary = generate_store_summary(restaurant.name, restaurant.category, restaurant.menu_summary, restaurant.address)
+        except (AIConfigurationError, AIServiceError):
+            pass
     created = []
     for affiliation_id in payload.affiliation_ids:
         if not db.get(Affiliation, affiliation_id):
             raise HTTPException(status_code=400, detail=f"소속 ID {affiliation_id}를 찾을 수 없습니다.")
-        partnership = Partnership(restaurant_id=restaurant.id, affiliation_id=affiliation_id, benefit_type=payload.benefit_type, discount_rate=payload.discount_rate, fixed_discount=payload.fixed_discount, service_item=payload.service_item, estimated_cash_value=payload.estimated_cash_value, min_order_amount=payload.min_order_amount, min_people=payload.min_people, payment_method=payload.payment_method, application_scope=payload.application_scope, verification_method=payload.verification_method, eligibility_description=payload.eligibility_description, start_date=payload.start_date, end_date=payload.end_date, status=payload.status, source=payload.source)
+        partnership = Partnership(restaurant_id=restaurant.id, affiliation_id=affiliation_id, benefit_type=payload.benefit_type, benefit_text=payload.benefit_text, benefit_ai_json=json.dumps(payload.benefit_ai_json, ensure_ascii=False), discount_rate=payload.discount_rate, fixed_discount=payload.fixed_discount, service_item=payload.service_item, estimated_cash_value=payload.estimated_cash_value, min_order_amount=payload.min_order_amount, min_people=payload.min_people, payment_method=payload.payment_method, application_scope=payload.application_scope, verification_method=payload.verification_method, eligibility_description=payload.eligibility_description, start_date=payload.start_date, end_date=payload.end_date, status=payload.status, source=payload.source)
+        if payload.benefit_ai_json:
+            _apply_benefit_analysis(partnership, payload.benefit_ai_json)
+        base, bonus, penalty, score = benefit_score_components(partnership)
+        partnership.benefit_base_score = base
+        partnership.benefit_bonus_score = bonus
+        partnership.benefit_condition_penalty = penalty
+        partnership.benefit_score_cached = score
+        if payload.benefit_ai_json:
+            partnership.benefit_preprocessed_at = datetime.utcnow()
         db.add(partnership)
         created.append(partnership)
     db.commit()
@@ -324,7 +490,18 @@ def update_partnership(partnership_id: int, payload: PartnershipUpdate, request:
     if not partnership:
         raise HTTPException(status_code=404, detail="제휴를 찾을 수 없습니다.")
     for key, value in payload.model_dump(exclude_unset=True).items():
+        if key == "benefit_ai_json":
+            value = json.dumps(value or {}, ensure_ascii=False)
         setattr(partnership, key, value)
+    if "benefit_ai_json" in payload.model_fields_set and payload.benefit_ai_json:
+        _apply_benefit_analysis(partnership, payload.benefit_ai_json)
+    if any(key in payload.model_fields_set for key in {"benefit_text", "benefit_type", "discount_rate", "fixed_discount", "service_item", "estimated_cash_value", "min_order_amount", "min_people", "payment_method", "eligibility_description", "verification_method", "benefit_ai_json"}):
+        base, bonus, penalty, score = benefit_score_components(partnership)
+        partnership.benefit_base_score = base
+        partnership.benefit_bonus_score = bonus
+        partnership.benefit_condition_penalty = penalty
+        partnership.benefit_score_cached = score
+        partnership.benefit_preprocessed_at = datetime.utcnow() if payload.benefit_ai_json else None
     db.commit()
     return {"ok": True}
 
@@ -353,6 +530,25 @@ async def import_preview(request: Request, file: UploadFile = File(...), db: Ses
     return result
 
 
+# Excel AI column conversion was intentionally removed. Uploads use the fixed template.
+async def import_ai_preview(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+    _require_admin(request, db)
+    content = await file.read()
+    try:
+        rows = parse_upload(file.filename or "upload.csv", content)
+        raise HTTPException(status_code=410, detail="엑셀 AI 형식 변환 기능은 제거되었습니다. 지정된 양식을 사용해 주세요.")
+        result = preview_rows(db, rows)
+    except AIConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except AIServiceError as exc:
+        raise HTTPException(status_code=400, detail=f"AI 변환에 실패했습니다: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"파일을 AI 형식으로 변환하지 못했습니다: {exc}") from exc
+    result["filename"] = file.filename
+    result["ai_transformed"] = True
+    return result
+
+
 @admin_router.get("/import/template")
 def import_template(request: Request, db: Session = Depends(get_db)):
     _require_admin(request, db)
@@ -374,7 +570,7 @@ def import_template(request: Request, db: Session = Depends(get_db)):
         ("카테고리", "식사류 / 카페/디저트 / 주점 / 기타"),
         ("주소", "도로명 주소"),
         ("위도·경도", "지도 좌표. 모르면 관리자에서 직접 확인"),
-        ("제휴대상", "학과·단과대·광운대학교 이름. 여러 개는 쉼표로 구분"),
+        ("제휴대상", "학과·단과대·전체 중 하나. 여러 개는 쉼표로 구분"),
         ("혜택", "예: 10% 할인, 2,000원 할인, 음료 1잔 제공"),
         ("시작일·종료일", "YYYY-MM-DD 형식"),
     ]
@@ -394,11 +590,64 @@ def import_commit(payload: ImportCommit, request: Request, db: Session = Depends
     return commit_rows(db, payload.rows)
 
 
-@admin_router.get("/analytics")
-def analytics(request: Request, db: Session = Depends(get_db)) -> dict:
+@admin_router.post("/ai/generate-summaries")
+def generate_missing_summaries(request: Request, force: bool = False, db: Session = Depends(get_db)) -> dict:
     _require_admin(request, db)
-    rows = db.execute(select(Restaurant.name, func.count(UsageEvent.id)).join(UsageEvent, UsageEvent.restaurant_id == Restaurant.id, isouter=True).group_by(Restaurant.id).order_by(func.count(UsageEvent.id).desc()).limit(10)).all()
-    return {"top_restaurants": [{"name": name, "events": count} for name, count in rows]}
+    settings = get_settings()
+    if not settings.gemini_api_key:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY가 설정되지 않았습니다.")
+    restaurants = db.scalars(select(Restaurant).where(Restaurant.status == "active")).all()
+    generated = 0
+    failed = 0
+    for restaurant in restaurants:
+        if restaurant.ai_summary and not force:
+            continue
+        try:
+            restaurant.ai_summary = generate_store_summary(restaurant.name, restaurant.category, restaurant.menu_summary, restaurant.address)
+            generated += 1
+        except AIServiceError:
+            failed += 1
+    db.commit()
+    return {"ok": True, "generated": generated, "failed": failed}
+
+
+@admin_router.post("/ai/preprocess-benefits")
+def preprocess_benefits(request: Request, db: Session = Depends(get_db)) -> dict:
+    """Use Gemini to extract raw benefit fields, then cache the score inputs."""
+    _require_admin(request, db)
+    if not get_settings().gemini_api_key:
+        raise HTTPException(status_code=503, detail="GEMINI_API_KEY가 설정되지 않았습니다.")
+    partnerships = db.scalars(select(Partnership)).all()
+    processed = 0
+    failed = 0
+    for partnership in partnerships:
+        raw_text = benefit_text(partnership)
+        try:
+            extracted = analyze_benefit(raw_text)
+            _apply_benefit_analysis(partnership, extracted)
+            partnership.benefit_ai_json = json.dumps(extracted, ensure_ascii=False)
+            partnership.benefit_text = raw_text
+            base, bonus, penalty, score = benefit_score_components(partnership)
+            partnership.benefit_base_score = base
+            partnership.benefit_bonus_score = bonus
+            partnership.benefit_condition_penalty = penalty
+            partnership.benefit_score_cached = score
+            partnership.benefit_preprocessed_at = datetime.utcnow()
+            processed += 1
+        except (AIServiceError, AIConfigurationError):
+            failed += 1
+    restaurants = db.scalars(select(Restaurant)).all()
+    total_reviews = sum(max(0, int(item.review_count or 0)) for item in restaurants)
+    platform_mean = (
+        sum((float(item.rating_average or 0) / 5 * 100) * max(0, int(item.review_count or 0)) for item in restaurants) / total_reviews
+        if total_reviews
+        else 60.0
+    )
+    for restaurant in restaurants:
+        restaurant.bayesian_satisfaction_score = bayesian_satisfaction(restaurant, platform_mean)
+        restaurant.satisfaction_preprocessed_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "processed": processed, "failed": failed}
 
 
 @admin_router.get("/reports")

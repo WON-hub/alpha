@@ -11,8 +11,11 @@ class Settings(BaseSettings):
     admin_session_days: int = 7
     supabase_url: str = ""
     supabase_anon_key: str = ""
-    google_geocoding_api_key: str = ""
+    place_search_provider: str = "kakao"
+    google_places_api_key: str = ""
+    kakao_rest_api_key: str = ""
     gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash"
     seed_on_startup: bool = True
     campus_lat: float = 37.6194
     campus_lng: float = 127.0598

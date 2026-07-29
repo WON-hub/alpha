@@ -28,10 +28,15 @@ class GroupIn(BaseModel):
 class RecommendationRequest(BaseModel):
     location: LocationIn
     category: str = "전체"
-    budget_per_person: int = Field(ge=0, le=1_000_000)
-    max_distance_m: int = Field(default=1500, ge=100, le=20_000)
+    budget_per_person: int = Field(default=12_000, ge=0, le=1_000_000)
+    max_distance_m: Optional[int] = Field(default=None, ge=100, le=20_000)
     groups: list[GroupIn] = Field(min_length=1)
     payment_method: Optional[str] = None
+
+    @field_validator("budget_per_person", mode="before")
+    @classmethod
+    def use_fixed_budget(cls, _value: Any) -> int:
+        return 12_000
 
 
 class ReviewCreate(BaseModel):
@@ -71,11 +76,15 @@ class PartnershipCreate(BaseModel):
     latitude: float
     longitude: float
     phone: str = ""
+    place_id: str = ""
+    place_provider: str = ""
     opening_hours: str = ""
     menu_summary: str = ""
     image_url: str = ""
     affiliation_ids: list[int] = Field(min_length=1)
     benefit_type: str
+    benefit_text: str = ""
+    benefit_ai_json: dict[str, Any] = Field(default_factory=dict)
     discount_rate: float = Field(default=0, ge=0, le=100)
     fixed_discount: int = Field(default=0, ge=0)
     service_item: str = ""
@@ -103,6 +112,8 @@ class PartnershipCreate(BaseModel):
 class PartnershipUpdate(BaseModel):
     status: Optional[str] = None
     end_date: Optional[date] = None
+    benefit_text: Optional[str] = None
+    benefit_ai_json: Optional[dict[str, Any]] = None
     discount_rate: Optional[float] = Field(default=None, ge=0, le=100)
     fixed_discount: Optional[int] = Field(default=None, ge=0)
     eligibility_description: Optional[str] = None
@@ -111,6 +122,10 @@ class PartnershipUpdate(BaseModel):
 
 class PartnershipBulkApprove(BaseModel):
     partnership_ids: list[int] = Field(min_length=1)
+
+
+class BenefitAnalyzeRequest(BaseModel):
+    benefit_text: str = Field(min_length=1, max_length=4000)
 
 
 class ReportUpdate(BaseModel):
@@ -137,6 +152,12 @@ class RecommendationResult(BaseModel):
     distance_m: float
     walking_minutes: int
     eligible_affiliations: list[str]
+    eligible_colleges: list[str]
+    ai_store_summary: str
+    benefit_items: list[str]
+    benefit_conditions: list[str]
+    benefit_grade: str
+    benefit_grade_emoji: str
     benefit_label: str
     application_scope: str
     payment_method: str
@@ -166,6 +187,7 @@ class RestaurantDetail(BaseModel):
     phone: str
     opening_hours: str
     menu_summary: str
+    ai_store_summary: str
     image_url: str
     rating_average: float
     review_count: int

@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -11,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.services.ai import AIConfigurationError, AIServiceError, generate_store_summary
 from app.models import Affiliation, ImportBatch, Partnership, Restaurant
+from app.services.recommendation import benefit_score_components
 
 
 COLUMN_ALIASES = {
@@ -186,7 +188,7 @@ def _normalise_import_row(raw: dict[str, Any]) -> dict[str, Any]:
     row = {str(key): value for key, value in raw.items()}
     row["restaurant_name"] = str(row.get("restaurant_name") or row.get("name") or "").strip()
     row["category"] = _normalise_category(row.get("category"))
-    row["target_affiliations"] = str(row.get("target_affiliations") or row.get("college") or settings.campus_name).strip()
+    row["target_affiliations"] = str(row.get("target_affiliations") or row.get("college") or "전체").strip()
     row["address"] = str(row.get("address") or f"{settings.campus_name} 주변 (원본 주소 미기재)").strip()
 
     row["benefit_text"] = _join_values(
@@ -295,6 +297,7 @@ def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual
         affiliation_ids: list[int] = []
         labels = _split_targets(row.get("target_affiliations"))
         labels.extend([str(row.get(key, "")).strip() for key in ("department", "college") if str(row.get(key, "")).strip()])
+        labels = ["전체" if label == get_settings().campus_name else label for label in labels]
         for label in labels:
             affiliation = db.scalar(select(Affiliation).where(Affiliation.name == label))
             if affiliation and affiliation.id not in affiliation_ids:
@@ -307,21 +310,33 @@ def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual
             restaurant = Restaurant(
                 name=str(row.get("restaurant_name")).strip(), category=str(row.get("category") or "기타"),
                 address=str(row.get("address") or ""), latitude=_number(row.get("latitude")), longitude=_number(row.get("longitude")),
-                phone=str(row.get("phone") or ""), menu_summary=str(row.get("notes") or ""), status="active",
+                phone=str(row.get("phone") or ""), menu_summary=str(row.get("menu_summary") or row.get("notes") or ""), status="active",
             )
             db.add(restaurant)
             db.flush()
+        elif not restaurant.menu_summary and row.get("menu_summary"):
+            restaurant.menu_summary = str(row.get("menu_summary"))
+        if not restaurant.ai_summary:
+            try:
+                restaurant.ai_summary = generate_store_summary(restaurant.name, restaurant.category, restaurant.menu_summary, restaurant.address)
+            except (AIConfigurationError, AIServiceError):
+                pass
         benefit = _benefit_fields(row.get("benefit_text"))
         for affiliation_id in affiliation_ids:
             partnership = Partnership(
                 restaurant_id=restaurant.id, affiliation_id=affiliation_id,
-                benefit_type=str(row.get("benefit_type") or benefit.get("benefit_type") or "discount"), discount_rate=_number(row.get("discount_rate") or benefit.get("discount_rate")),
+                benefit_type=str(row.get("benefit_type") or benefit.get("benefit_type") or "discount"), benefit_text=str(row.get("benefit_text") or ""), discount_rate=_number(row.get("discount_rate") or benefit.get("discount_rate")),
                 fixed_discount=int(_number(row.get("fixed_discount") or benefit.get("fixed_discount"))), service_item=str(row.get("service_item") or benefit.get("service_item") or ""),
                 estimated_cash_value=int(_number(row.get("estimated_cash_value") or benefit.get("estimated_cash_value"))), min_order_amount=int(_number(row.get("min_order_amount"))),
                 min_people=int(_number(row.get("min_people"), 1)), payment_method=str(row.get("payment_method") or ""),
                 application_scope=str(row.get("application_scope") or "ALL_GROUP"), verification_method=str(row.get("verification_method") or "학생증"),
                 eligibility_description=str(row.get("eligibility") or ""), start_date=start_date, end_date=end_date, status="pending", source="import",
             )
+            base, bonus, penalty, score = benefit_score_components(partnership)
+            partnership.benefit_base_score = base
+            partnership.benefit_bonus_score = bonus
+            partnership.benefit_condition_penalty = penalty
+            partnership.benefit_score_cached = score
             db.add(partnership)
         imported += 1
     batch = ImportBatch(filename=filename, status="committed", row_count=len(rows), errors_json=json.dumps([]))

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>관리자 · 제휴식당 어디지?</title>
     <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/static/css/admin.css?v=20260728-2" />
+    <link rel="stylesheet" href="/static/css/admin.css?v=20260729-4" />
   </head>
   <body>
     <div id="admin-root">
@@ -17,7 +17,6 @@
           <button data-view="new" class="side-nav">＋ <span>신규 제휴 등록</span></button>
           <button data-view="partnerships" class="side-nav">▤ <span>제휴 정보 관리</span></button>
           <button data-view="import" class="side-nav">⇧ <span>데이터 일괄 등록</span></button>
-          <button data-view="analytics" class="side-nav">◒ <span>이용 현황 분석</span></button>
           <button data-view="reports" class="side-nav">⚑ <span>리뷰 및 신고 관리</span></button>
         </nav>
         <a href="/" class="back-link">← 사용자 화면</a>
@@ -45,13 +44,11 @@
           <section id="view-new" class="admin-view" hidden></section>
           <section id="view-partnerships" class="admin-view" hidden></section>
           <section id="view-import" class="admin-view" hidden></section>
-          <section id="view-analytics" class="admin-view" hidden></section>
           <section id="view-reports" class="admin-view" hidden></section>
         </div>
       </main>
     </div>
     <div id="admin-toast" class="admin-toast" role="status" aria-live="polite"></div>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-    <script type="module" src="/static/js/admin.js?v=20260728-4"></script>
+    <script type="module" src="/static/js/admin.js?v=20260729-4"></script>
   </body>
 </html>
