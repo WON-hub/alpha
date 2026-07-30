@@ -1,0 +1,6 @@
+table,file,row_count,generated_at_utc,notes
+affiliations,supabase/snapshot/affiliations.csv,46,2026-07-30T11:55:05.385552Z,Public application data snapshot.
+restaurants,supabase/snapshot/restaurants.csv,45,2026-07-30T11:55:05.385552Z,Public application data snapshot.
+partnerships,supabase/snapshot/partnerships.csv,31,2026-07-30T11:55:05.385552Z,Public application data snapshot.
+reviews,supabase/snapshot/reviews_public.csv,281,2026-07-30T11:55:05.385552Z,Visible review scores; author names and real user review text are redacted.
+benefit_scoring_rules,supabase/snapshot/benefit_scoring_rules.csv,27,2026-07-30T11:55:05.385552Z,Public application data snapshot.
