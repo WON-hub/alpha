@@ -5,6 +5,7 @@ from app.schemas import GroupIn, LocationIn, RecommendationRequest
 from app.services.recommendation import (
     bayesian_satisfaction,
     benefit_grade,
+    benefit_score_components,
     calculate_savings,
     distance_score,
     is_partnership_valid,
@@ -64,22 +65,30 @@ def test_application_scope_and_fixed_budget_savings():
 
 
 def test_distance_bands_are_discrete():
-    assert distance_score(0) == 100
-    assert distance_score(49.9) == 100
-    assert distance_score(50) == 80
-    assert distance_score(100) == 60
-    assert distance_score(150) == 40
-    assert distance_score(250) == 20
-    assert distance_score(500) == 0
+    assert distance_score(0) == 5
+    assert distance_score(99.9) == 5
+    assert distance_score(100) == 4
+    assert distance_score(200) == 3
+    assert distance_score(400) == 2
+    assert distance_score(600) == 1
+    assert distance_score(999.9) == 1
+    assert distance_score(1000) == 0
 
 
-def test_benefit_grade_thresholds_are_relaxed():
-    assert benefit_grade(65)[0] == "황금밥알"
-    assert benefit_grade(64.9)[0] == "은빛밥알"
-    assert benefit_grade(50)[0] == "은빛밥알"
-    assert benefit_grade(49.9)[0] == "고운밥알"
-    assert benefit_grade(30)[0] == "고운밥알"
-    assert benefit_grade(29.9)[0] == "한톨밥알"
+def test_benefit_grade_thresholds_match_report():
+    assert benefit_grade(80)[0] == "황금밥알"
+    assert benefit_grade(79.9)[0] == "은빛밥알"
+    assert benefit_grade(60)[0] == "은빛밥알"
+    assert benefit_grade(59.9)[0] == "고운밥알"
+    assert benefit_grade(40)[0] == "고운밥알"
+    assert benefit_grade(39.9)[0] == "한톨밥알"
+
+
+def test_report_benefit_bonus_adds_five_for_multiple_services():
+    partnership = build_partnership(rate=0, service_item="음료와 사리 제공")
+    _base, bonus, _penalty, score = benefit_score_components(partnership)
+    assert bonus == 5
+    assert score == 65
 
 
 def test_bayesian_satisfaction_uses_platform_prior_for_new_store():

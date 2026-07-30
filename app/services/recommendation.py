@@ -14,11 +14,13 @@ MIN_REVIEW_COUNT = 10
 DEFAULT_PLATFORM_SATISFACTION = 60.0
 
 DISTANCE_BANDS = (
-    (50, 100),
-    (100, 80),
-    (150, 60),
-    (250, 40),
-    (500, 20),
+    (100, 5),
+    (200, 4),
+    (400, 3),
+    (600, 2),
+    # The report omits 600-700m; use the report's 1-point band continuously
+    # through 1000m so no distance falls into an undefined interval.
+    (1000, 1),
 )
 
 
@@ -166,6 +168,12 @@ def benefit_score_components(partnership: Partnership) -> tuple[float, float, fl
     has_discount = bool(partnership.discount_rate or partnership.fixed_discount)
     has_service = bool(partnership.service_item or any(token in text for token in ("음료", "사이드", "서비스")))
     bonus = 5.0 if has_discount and has_service else 0.0
+    if not any(token in text for token in ("또는", "택1", "택 1")):
+        benefit_parts = [part for part in re.split(r"(?:\r?\n|;|①|②|③|④)", benefit_text(partnership)) if part.strip()]
+        bonus = max(bonus, float(max(0, len(benefit_parts) - 1) * 5))
+        service_tokens = ("음료", "사이드", "라면", "감자", "토핑", "사리", "소스", "사이즈업", "계란", "콜라", "치즈", "만두", "떡")
+        service_count = sum(token in text for token in service_tokens)
+        bonus = max(bonus, float(max(0, service_count - 1) * 5))
     penalty = float(_condition_penalty(partnership))
     score = max(0.0, min(100.0, base + bonus - penalty))
     return base, bonus, penalty, score
@@ -268,11 +276,11 @@ def public_benefit_label(partnership: Partnership) -> str:
 
 
 def benefit_grade(score: float) -> tuple[str, str]:
-    if score >= 65:
+    if score >= 80:
         return "황금밥알", "🌟🍚"
-    if score >= 50:
+    if score >= 60:
         return "은빛밥알", "✨🍚"
-    if score >= 30:
+    if score >= 40:
         return "고운밥알", "🌸🍚"
     return "한톨밥알", "🍚"
 
@@ -338,7 +346,7 @@ def recommend(
                 continue
             benefit = calculate_benefit_score(partnership, eligible)
             distance = distance_score(distance_m)
-            cdi = benefit * 0.60 + distance * 0.25 + satisfaction * 0.15
+            cdi = benefit * 0.53 + distance * 0.27 + satisfaction * 0.20
             savings = calculate_savings(partnership, budget_per_person, eligible)
             grade, emoji = benefit_grade(benefit)
             candidate = {
