@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from io import BytesIO
 from datetime import date, datetime, timedelta
@@ -17,7 +18,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import Affiliation, Favorite, Partnership, Report, Restaurant, Review, UsageEvent, User
 from app.schemas import AuthSync, RecommendationRequest, ReportCreate, RestaurantDetail, ReviewCreate, UsageEventCreate
-from app.services.import_service import commit_rows, parse_upload, preview_rows
+from app.services.import_service import commit_rows, enrich_missing_coordinates, parse_upload, preview_rows
 from app.services.ai import AIConfigurationError, AIServiceError, analyze_benefit, generate_recommendation_reason, generate_store_summary
 from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, search_places
 from app.services.recommendation import benefit_conditions, benefit_items, benefit_score_components, benefit_text, bayesian_satisfaction, public_benefit_label, recommend
@@ -60,6 +61,15 @@ def _json_object(value: str) -> dict:
 def _analysis_value(analysis: dict, snake_key: str, camel_key: str, default=None):
     value = analysis.get(camel_key, analysis.get(snake_key, default))
     return default if value is None else value
+
+
+def _has_coordinates(latitude: float | None, longitude: float | None) -> bool:
+    try:
+        lat = float(latitude)
+        lng = float(longitude)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(lat) and math.isfinite(lng) and -90 <= lat <= 90 and -180 <= lng <= 180 and lat != 0 and lng != 0
 
 
 def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
@@ -442,8 +452,17 @@ async def refresh_place(restaurant_id: int, request: Request, place_id: str | No
 
 
 @admin_router.post("/partnerships")
-def create_partnership(payload: PartnershipCreate, request: Request, db: Session = Depends(get_db)) -> dict:
+async def create_partnership(payload: PartnershipCreate, request: Request, db: Session = Depends(get_db)) -> dict:
     _require_admin(request, db)
+    latitude = payload.latitude
+    longitude = payload.longitude
+    address = payload.address
+    phone = payload.phone
+    place_id = payload.place_id
+    place_provider = payload.place_provider
+    opening_hours = payload.opening_hours
+    image_url = payload.image_url
+
     if payload.restaurant_id:
         restaurant = db.get(Restaurant, payload.restaurant_id)
         if not restaurant:
@@ -454,10 +473,50 @@ def create_partnership(payload: PartnershipCreate, request: Request, db: Session
             restaurant = db.scalar(select(Restaurant).where(Restaurant.place_id == payload.place_id, Restaurant.place_provider == payload.place_provider))
         if not restaurant and payload.address:
             restaurant = db.scalar(select(Restaurant).where(Restaurant.name == payload.restaurant_name, Restaurant.address == payload.address))
-        if not restaurant:
-            restaurant = Restaurant(name=payload.restaurant_name, category=payload.category, address=payload.address, latitude=payload.latitude, longitude=payload.longitude, phone=payload.phone, place_id=payload.place_id, place_provider=payload.place_provider, opening_hours=payload.opening_hours, menu_summary=payload.menu_summary, image_url=payload.image_url, status="active")
-            db.add(restaurant)
-            db.flush()
+    if restaurant and not _has_coordinates(restaurant.latitude, restaurant.longitude):
+        try:
+            places = await search_places(" ".join(part for part in (payload.restaurant_name, payload.address) if part).strip())
+        except (PlaceSearchConfigurationError, PlaceSearchError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        selected = places[0] if places else None
+        if not selected:
+            raise HTTPException(status_code=404, detail="좌표를 자동 생성할 장소 검색 결과가 없습니다.")
+        latitude = selected.get("latitude")
+        longitude = selected.get("longitude")
+        address = address or selected.get("address") or ""
+        phone = phone or selected.get("phone") or ""
+        place_id = place_id or selected.get("place_id") or ""
+        place_provider = place_provider or selected.get("place_provider") or ""
+        opening_hours = opening_hours or selected.get("opening_hours") or ""
+        image_url = image_url or selected.get("image_url") or ""
+        restaurant.latitude = latitude
+        restaurant.longitude = longitude
+        restaurant.address = address
+        restaurant.phone = phone
+        restaurant.place_id = place_id
+        restaurant.place_provider = place_provider
+    if not restaurant and not _has_coordinates(latitude, longitude):
+        try:
+            places = await search_places(" ".join(part for part in (payload.restaurant_name, payload.address) if part).strip())
+        except (PlaceSearchConfigurationError, PlaceSearchError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        selected = places[0] if places else None
+        if not selected:
+            raise HTTPException(status_code=404, detail="좌표를 자동 생성할 장소 검색 결과가 없습니다.")
+        latitude = selected.get("latitude")
+        longitude = selected.get("longitude")
+        address = address or selected.get("address") or ""
+        phone = phone or selected.get("phone") or ""
+        place_id = place_id or selected.get("place_id") or ""
+        place_provider = place_provider or selected.get("place_provider") or ""
+        opening_hours = opening_hours or selected.get("opening_hours") or ""
+        image_url = image_url or selected.get("image_url") or ""
+    if not restaurant and not _has_coordinates(latitude, longitude):
+        raise HTTPException(status_code=422, detail="주소 또는 좌표를 입력해 주세요.")
+    if not restaurant:
+        restaurant = Restaurant(name=payload.restaurant_name, category=payload.category, address=address, latitude=latitude, longitude=longitude, phone=phone, place_id=place_id, place_provider=place_provider, opening_hours=opening_hours, menu_summary=payload.menu_summary, image_url=image_url, status="active")
+        db.add(restaurant)
+        db.flush()
     if not restaurant.ai_summary:
         try:
             restaurant.ai_summary = generate_store_summary(restaurant.name, restaurant.category, restaurant.menu_summary, restaurant.address)
@@ -523,6 +582,7 @@ async def import_preview(request: Request, file: UploadFile = File(...), db: Ses
     content = await file.read()
     try:
         rows = parse_upload(file.filename or "upload.csv", content)
+        rows = await enrich_missing_coordinates(db, rows)
         result = preview_rows(db, rows)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"파일을 읽지 못했습니다: {exc}") from exc
@@ -585,9 +645,10 @@ def import_template(request: Request, db: Session = Depends(get_db)):
 
 
 @admin_router.post("/import/commit")
-def import_commit(payload: ImportCommit, request: Request, db: Session = Depends(get_db)) -> dict:
+async def import_commit(payload: ImportCommit, request: Request, db: Session = Depends(get_db)) -> dict:
     _require_admin(request, db)
-    return commit_rows(db, payload.rows)
+    rows = await enrich_missing_coordinates(db, payload.rows)
+    return commit_rows(db, rows)
 
 
 @admin_router.post("/ai/generate-summaries")

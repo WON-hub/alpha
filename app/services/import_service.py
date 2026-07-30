@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
 from datetime import date, datetime
 from typing import Any
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.services.ai import AIConfigurationError, AIServiceError, generate_store_summary
 from app.models import Affiliation, ImportBatch, Partnership, Restaurant
+from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, resolve_place
 from app.services.recommendation import benefit_score_components
 
 
@@ -189,7 +191,7 @@ def _normalise_import_row(raw: dict[str, Any]) -> dict[str, Any]:
     row["restaurant_name"] = str(row.get("restaurant_name") or row.get("name") or "").strip()
     row["category"] = _normalise_category(row.get("category"))
     row["target_affiliations"] = str(row.get("target_affiliations") or row.get("college") or "전체").strip()
-    row["address"] = str(row.get("address") or f"{settings.campus_name} 주변 (원본 주소 미기재)").strip()
+    row["address"] = str(row.get("address") or "").strip()
 
     row["benefit_text"] = _join_values(
         row,
@@ -219,9 +221,20 @@ def _normalise_import_row(raw: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             row["discount_rate"] = ""
     if row.get("latitude") in (None, "") or row.get("longitude") in (None, ""):
-        row["latitude"], row["longitude"] = settings.campus_lat, settings.campus_lng
-        row["_coordinate_fallback"] = True
+        row["_coordinate_missing"] = True
     return row
+
+
+def _valid_coordinate(value: Any, minimum: float, maximum: float) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and minimum <= number <= maximum and number != 0
+
+
+def _has_coordinates(row: dict[str, Any]) -> bool:
+    return _valid_coordinate(row.get("latitude"), -90, 90) and _valid_coordinate(row.get("longitude"), -180, 180)
 
 
 def parse_upload(filename: str, content: bytes) -> list[dict[str, Any]]:
@@ -230,6 +243,57 @@ def parse_upload(filename: str, content: bytes) -> list[dict[str, Any]]:
     frame = frame.rename(columns={column: COLUMN_ALIASES.get(_normalise_key(column), _normalise_key(column)) for column in frame.columns})
     records = frame.astype(object).where(pd.notna(frame), "").to_dict(orient="records")
     return [_normalise_import_row(row) for row in records]
+
+
+async def enrich_missing_coordinates(db: Session, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fill missing import coordinates from the DB or Kakao/Google place search once per store."""
+    resolved_cache: dict[str, dict[str, Any] | None] = {}
+    for index, raw in enumerate(rows):
+        row = _normalise_import_row(raw)
+        if _has_coordinates(row):
+            rows[index] = row
+            continue
+
+        name = str(row.get("restaurant_name") or "").strip()
+        address = str(row.get("address") or "").strip()
+        if not name:
+            rows[index] = row
+            continue
+        cache_key = f"{name.casefold()}|{address.casefold()}"
+        if cache_key not in resolved_cache:
+            existing = db.scalar(select(Restaurant).where(Restaurant.name == name))
+            if existing and _has_coordinates({"latitude": existing.latitude, "longitude": existing.longitude}):
+                resolved_cache[cache_key] = {
+                    "latitude": existing.latitude,
+                    "longitude": existing.longitude,
+                    "address": existing.address,
+                    "phone": existing.phone,
+                    "place_id": existing.place_id,
+                    "place_provider": existing.place_provider,
+                }
+            else:
+                try:
+                    resolved_cache[cache_key] = await resolve_place(name, address)
+                except (PlaceSearchConfigurationError, PlaceSearchError) as exc:
+                    row["_coordinate_error"] = str(exc)
+                    resolved_cache[cache_key] = None
+
+        selected = resolved_cache[cache_key]
+        if selected:
+            row["latitude"] = selected.get("latitude")
+            row["longitude"] = selected.get("longitude")
+            if not row.get("address"):
+                row["address"] = selected.get("address") or ""
+            if not row.get("phone"):
+                row["phone"] = selected.get("phone") or ""
+            row["place_id"] = selected.get("place_id") or ""
+            row["place_provider"] = selected.get("place_provider") or ""
+            row["_coordinate_autofilled"] = True
+            row.pop("_coordinate_error", None)
+        elif not row.get("_coordinate_error"):
+            row["_coordinate_error"] = "장소 검색 결과가 없습니다. 가게명이나 주소를 확인해 주세요."
+        rows[index] = row
+    return rows
 
 
 def preview_rows(db: Session, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -251,13 +315,13 @@ def preview_rows(db: Session, rows: list[dict[str, Any]]) -> dict[str, Any]:
             row_errors.append("제휴대상 필수")
         if _date_or_none(row.get("start_date")) is None or _date_or_none(row.get("end_date")) is None:
             row_errors.append("날짜 형식 확인 필요")
-        if row.get("latitude") in ("", None) or row.get("longitude") in ("", None):
-            row_errors.append("좌표 누락")
+        if not _has_coordinates(row):
+            row_errors.append(f"좌표 자동 생성 실패: {row.get('_coordinate_error') or '가게명이나 주소를 확인해 주세요.'}")
         warnings: list[str] = []
         if duplicate_name:
             warnings.append("같은 업체명이 반복되어 혜택 행별로 등록합니다")
-        if row.get("_coordinate_fallback"):
-            warnings.append("좌표가 없어 광운대학교 기본 좌표를 사용합니다")
+        if row.get("_coordinate_autofilled"):
+            warnings.append("카카오 장소 검색으로 좌표를 자동 입력했습니다")
         if row.get("_period_fallback"):
             warnings.append("기간이 없어 2026-01-01~2026-12-31을 임시 사용합니다")
         parsed = dict(row)
@@ -292,6 +356,9 @@ def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual
         start_date = _date_or_none(row.get("start_date"))
         end_date = _date_or_none(row.get("end_date"))
         if not start_date or not end_date or end_date < start_date:
+            skipped += 1
+            continue
+        if not _has_coordinates(row):
             skipped += 1
             continue
         affiliation_ids: list[int] = []

@@ -73,8 +73,8 @@ class PartnershipCreate(BaseModel):
     restaurant_name: str = Field(min_length=1, max_length=160)
     category: str
     address: str = ""
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     phone: str = ""
     place_id: str = ""
     place_provider: str = ""

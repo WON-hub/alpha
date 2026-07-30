@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -13,6 +14,10 @@ class PlaceSearchConfigurationError(RuntimeError):
 
 class PlaceSearchError(RuntimeError):
     pass
+
+
+def _match_text(value: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", str(value or "").casefold())
 
 
 def _google_category(place: dict[str, Any]) -> str:
@@ -70,6 +75,10 @@ async def _search_kakao(query: str, api_key: str) -> list[dict[str, Any]]:
     async with httpx.AsyncClient(timeout=8) as client:
         response = await client.get(endpoint, headers=headers, params=params)
     if response.status_code >= 400:
+        if response.status_code == 401:
+            raise PlaceSearchError("카카오 장소 검색 인증에 실패했습니다. KAKAO_REST_API_KEY에는 카카오디벨로퍼스의 REST API 키를 입력해 주세요.")
+        if response.status_code == 403:
+            raise PlaceSearchError("카카오 Local API가 비활성화되어 있습니다. 카카오 디벨로퍼스에서 이 앱의 OPEN_MAP_AND_LOCAL 서비스를 활성화해 주세요.")
         raise PlaceSearchError(f"Kakao Local API 요청이 실패했습니다. ({response.status_code})")
     documents = response.json().get("documents") or []
     results: list[dict[str, Any]] = []
@@ -107,3 +116,26 @@ async def search_places(query: str) -> list[dict[str, Any]]:
             raise PlaceSearchConfigurationError("KAKAO_REST_API_KEY가 설정되지 않았습니다.")
         return await _search_kakao(normalized_query, settings.kakao_rest_api_key)
     raise PlaceSearchConfigurationError("PLACE_SEARCH_PROVIDER는 google 또는 kakao여야 합니다.")
+
+
+async def resolve_place(name: str, address: str = "") -> dict[str, Any] | None:
+    """Resolve one store to a provider result for admin-side coordinate autofill."""
+    store_name = str(name or "").strip()
+    store_address = str(address or "").strip()
+    query = " ".join(part for part in (store_name, store_address) if part).strip()
+    results = await search_places(query)
+    if not results:
+        return None
+
+    wanted_name = _match_text(store_name)
+    wanted_address = _match_text(store_address)
+
+    def rank(item: dict[str, Any]) -> tuple[int, int, int]:
+        candidate_name = _match_text(item.get("name", ""))
+        candidate_address = _match_text(item.get("address", ""))
+        exact_name = int(bool(wanted_name and candidate_name == wanted_name))
+        name_contains = int(bool(wanted_name and (wanted_name in candidate_name or candidate_name in wanted_name)))
+        address_contains = int(bool(wanted_address and (wanted_address in candidate_address or candidate_address in wanted_address)))
+        return exact_name, name_contains, address_contains
+
+    return max(results, key=rank)

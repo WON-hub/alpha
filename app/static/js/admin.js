@@ -113,6 +113,11 @@ function showNew() {
     form.benefit_text.addEventListener("input", () => { analysisPreview.textContent = ""; analysisPreview.style.display = "none"; });
     form.start_date.value = new Date().toISOString().slice(0, 10);
     form.end_date.value = new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
+    for (const key of ["latitude", "longitude"]) {
+      form.elements[key].value = "";
+      form.elements[key].removeAttribute("required");
+    }
+    form.elements.longitude.closest(".form-field")?.insertAdjacentHTML("beforeend", '<p class="helper">가게 정보 검색 결과를 선택하면 주소와 좌표가 자동 입력됩니다. 입력하지 않아도 저장 시 카카오 검색으로 자동 보완합니다.</p>');
     const fillPlace = (item) => {
       for (const key of ["name", "category", "address", "phone", "opening_hours", "image_url", "latitude", "longitude"]) if (form.elements[key] && item[key] != null) form.elements[key].value = item[key];
       form.restaurant_id.value = item.restaurant_id || "";
