@@ -19,7 +19,7 @@ from app.database import get_db
 from app.models import Affiliation, Favorite, Partnership, Report, Restaurant, Review, UsageEvent, User
 from app.schemas import AuthSync, RecommendationRequest, ReportCreate, RestaurantDetail, ReviewCreate, UsageEventCreate
 from app.services.import_service import commit_rows, enrich_missing_coordinates, parse_upload, preview_rows
-from app.services.ai import AIConfigurationError, AIServiceError, analyze_benefit, generate_recommendation_reason, generate_store_summary
+from app.services.ai import AIConfigurationError, AIServiceError, analyze_benefit, generate_recommendation_reason, generate_store_summary, normalize_benefit_analysis
 from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, search_places
 from app.services.recommendation import benefit_conditions, benefit_items, benefit_score_components, benefit_text, bayesian_satisfaction, public_benefit_label, recommend
 from app.services.scoring_rules import load_scoring_rules
@@ -73,8 +73,9 @@ def _has_coordinates(latitude: float | None, longitude: float | None) -> bool:
     return math.isfinite(lat) and math.isfinite(lng) and -90 <= lat <= 90 and -180 <= lng <= 180 and lat != 0 and lng != 0
 
 
-def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
-    """Apply AI fields to legacy scoring columns while retaining the full JSON."""
+def _apply_benefit_analysis(partnership: Partnership, analysis: dict, scoring_rules=None, benefit_text: str | None = None) -> dict:
+    """Apply normalized AI fields to legacy columns and persist the score breakdown JSON."""
+    analysis = normalize_benefit_analysis(analysis, benefit_text or partnership.benefit_text, scoring_rules)
     rate = _analysis_value(analysis, "discount_rate", "discountRate")
     amount = _analysis_value(analysis, "fixed_discount", "discountAmount")
     free_item = _analysis_value(analysis, "service_item", "freeItem", "")
@@ -110,6 +111,10 @@ def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
     review_items = [*(str(item) for item in unknown_benefits), *(str(item) for item in unknown_conditions)]
     partnership.benefit_review_note = " / ".join(review_items) if review_items else ("AI 분석 결과 관리자 확인 필요" if needs_review else "")
 
+    partnership.benefit_base_score = float(analysis.get("benefitBaseScore", analysis.get("baseScore", 0)) or 0)
+    partnership.benefit_bonus_score = float(analysis.get("benefitBonusScore", analysis.get("bonusScore", 0)) or 0)
+    partnership.benefit_condition_penalty = float(analysis.get("benefitConditionPenalty", analysis.get("conditionPenalty", 0)) or 0)
+
     benefit_type = str(_analysis_value(analysis, "benefit_type", "benefitType", "discount") or "discount").lower()
     if rate not in (None, "", 0):
         partnership.benefit_type = "percentage"
@@ -119,10 +124,20 @@ def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
         partnership.benefit_type = "service"
     elif benefit_type in {"percentage", "fixed", "service", "discount"}:
         partnership.benefit_type = benefit_type
+    partnership.benefit_ai_json = json.dumps(analysis, ensure_ascii=False)
+    return analysis
 
 
 def _cache_benefit_score(partnership: Partnership, scoring_rules) -> None:
-    base, bonus, penalty, score = benefit_score_components(partnership, scoring_rules)
+    analysis = _json_object(partnership.benefit_ai_json)
+    if all(key in analysis for key in ("benefitBaseScore", "benefitBonusScore", "benefitConditionPenalty", "finalBenefitScore")):
+        base = float(analysis.get("benefitBaseScore") or 0)
+        bonus = float(analysis.get("benefitBonusScore") or 0)
+        penalty = min(20.0, max(0.0, float(analysis.get("benefitConditionPenalty") or 0)))
+        score = max(0.0, min(100.0, base + bonus - penalty))
+    else:
+        # Legacy/manual records without normalized AI JSON remain deterministic.
+        base, bonus, penalty, score = benefit_score_components(partnership, scoring_rules)
     partnership.benefit_base_score = base
     partnership.benefit_bonus_score = bonus
     partnership.benefit_condition_penalty = penalty
@@ -440,7 +455,7 @@ def admin_analyze_benefit(payload: BenefitAnalyzeRequest, request: Request, db: 
     if not get_settings().gemini_api_key:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY가 설정되지 않았습니다.")
     try:
-        return {"ok": True, "analysis": analyze_benefit(payload.benefit_text)}
+        return {"ok": True, "analysis": analyze_benefit(payload.benefit_text, load_scoring_rules(db))}
     except (AIConfigurationError, AIServiceError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -545,7 +560,7 @@ async def create_partnership(payload: PartnershipCreate, request: Request, db: S
             raise HTTPException(status_code=400, detail=f"소속 ID {affiliation_id}를 찾을 수 없습니다.")
         partnership = Partnership(restaurant_id=restaurant.id, affiliation_id=affiliation_id, benefit_type=payload.benefit_type, benefit_text=payload.benefit_text, benefit_ai_json=json.dumps(payload.benefit_ai_json, ensure_ascii=False), discount_rate=payload.discount_rate, fixed_discount=payload.fixed_discount, service_item=payload.service_item, estimated_cash_value=payload.estimated_cash_value, min_order_amount=payload.min_order_amount, min_people=payload.min_people, payment_method=payload.payment_method, application_scope=payload.application_scope, verification_method=payload.verification_method, eligibility_description=payload.eligibility_description, start_date=payload.start_date, end_date=payload.end_date, status=payload.status, source=payload.source)
         if payload.benefit_ai_json:
-            _apply_benefit_analysis(partnership, payload.benefit_ai_json)
+            _apply_benefit_analysis(partnership, payload.benefit_ai_json, scoring_rules, payload.benefit_text)
         else:
             partnership.benefit_needs_review = True
             partnership.benefit_review_note = "AI 혜택 분석 필요"
@@ -569,7 +584,7 @@ def update_partnership(partnership_id: int, payload: PartnershipUpdate, request:
             value = json.dumps(value or {}, ensure_ascii=False)
         setattr(partnership, key, value)
     if "benefit_ai_json" in payload.model_fields_set and payload.benefit_ai_json:
-        _apply_benefit_analysis(partnership, payload.benefit_ai_json)
+        _apply_benefit_analysis(partnership, payload.benefit_ai_json, load_scoring_rules(db), payload.benefit_text or partnership.benefit_text)
     scoring_fields = {"benefit_text", "benefit_type", "discount_rate", "fixed_discount", "service_item", "estimated_cash_value", "min_order_amount", "min_people", "payment_method", "eligibility_description", "verification_method", "benefit_ai_json"}
     if any(key in payload.model_fields_set for key in scoring_fields):
         if not payload.benefit_ai_json and "benefit_ai_json" in payload.model_fields_set:
@@ -705,9 +720,8 @@ def preprocess_benefits(request: Request, db: Session = Depends(get_db)) -> dict
     for partnership in partnerships:
         raw_text = benefit_text(partnership)
         try:
-            extracted = analyze_benefit(raw_text)
-            _apply_benefit_analysis(partnership, extracted)
-            partnership.benefit_ai_json = json.dumps(extracted, ensure_ascii=False)
+            extracted = analyze_benefit(raw_text, scoring_rules)
+            _apply_benefit_analysis(partnership, extracted, scoring_rules, raw_text)
             partnership.benefit_text = raw_text
             _cache_benefit_score(partnership, scoring_rules)
             if partnership.benefit_needs_review:

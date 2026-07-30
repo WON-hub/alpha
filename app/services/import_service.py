@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.services.ai import AIConfigurationError, AIServiceError, generate_store_summary
+from app.services.ai import AIConfigurationError, AIServiceError, analyze_benefit, generate_store_summary
 from app.models import Affiliation, ImportBatch, Partnership, Restaurant
 from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, resolve_place
 from app.services.recommendation import benefit_score_components
@@ -346,6 +346,47 @@ def _number(value: Any, default: float = 0) -> float:
         return default
 
 
+def _apply_import_ai_analysis(partnership: Partnership, analysis: dict[str, Any]) -> None:
+    """Apply one normalized benefit analysis to an imported partnership row."""
+    rate = analysis.get("discountRate", analysis.get("discount_rate"))
+    amount = analysis.get("discountAmount", analysis.get("fixed_discount"))
+    free_item = analysis.get("freeItem", analysis.get("service_item", "")) or ""
+    minimum_order = analysis.get("minimumOrder", analysis.get("min_order_amount"))
+    required_people = analysis.get("requiredPeople", analysis.get("min_people"))
+    conditions = analysis.get("conditions") or []
+    needs_review = bool(analysis.get("needsReview") or analysis.get("unknownBenefits") or analysis.get("unknownConditions"))
+
+    if rate not in (None, ""):
+        partnership.discount_rate = _number(rate)
+    if amount not in (None, ""):
+        partnership.fixed_discount = int(_number(amount))
+    if free_item not in (None, ""):
+        partnership.service_item = str(free_item)
+    if minimum_order not in (None, ""):
+        partnership.min_order_amount = int(_number(minimum_order))
+    if required_people not in (None, ""):
+        partnership.min_people = max(1, int(_number(required_people, 1)))
+    if conditions:
+        partnership.eligibility_description = " / ".join(str(item) for item in conditions)
+    if analysis.get("studentVerification") and not partnership.verification_method:
+        partnership.verification_method = "학생증 제시"
+    if rate not in (None, "", 0):
+        partnership.benefit_type = "percentage"
+    elif amount not in (None, "", 0):
+        partnership.benefit_type = "fixed"
+    elif free_item:
+        partnership.benefit_type = "service"
+    partnership.benefit_ai_json = json.dumps(analysis, ensure_ascii=False)
+    partnership.benefit_base_score = float(analysis.get("benefitBaseScore", analysis.get("baseScore", 0)) or 0)
+    partnership.benefit_bonus_score = float(analysis.get("benefitBonusScore", analysis.get("bonusScore", 0)) or 0)
+    partnership.benefit_condition_penalty = float(analysis.get("benefitConditionPenalty", analysis.get("conditionPenalty", 0)) or 0)
+    partnership.benefit_needs_review = needs_review
+    partnership.benefit_score_cached = 0 if needs_review else float(analysis.get("finalBenefitScore", analysis.get("benefitScore", 0)) or 0)
+    partnership.benefit_preprocessed_at = None if needs_review else datetime.utcnow()
+    review_items = [*(str(item) for item in analysis.get("unknownBenefits", [])), *(str(item) for item in analysis.get("unknownConditions", []))]
+    partnership.benefit_review_note = " / ".join(review_items) if review_items else ("AI 분석 결과 관리자 확인 필요" if needs_review else "")
+
+
 def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual") -> dict[str, int]:
     imported = 0
     scoring_rules = load_scoring_rules(db)
@@ -374,6 +415,14 @@ def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual
         if not affiliation_ids:
             skipped += 1
             continue
+        benefit_text_value = str(row.get("benefit_text") or "").strip()
+        ai_analysis = None
+        if benefit_text_value:
+            try:
+                # One AI call per imported row; reuse the normalized result for every affiliation.
+                ai_analysis = analyze_benefit(benefit_text_value, scoring_rules)
+            except (AIConfigurationError, AIServiceError):
+                ai_analysis = None
         restaurant = db.scalar(select(Restaurant).where(Restaurant.name == str(row.get("restaurant_name")).strip()))
         if not restaurant:
             restaurant = Restaurant(
@@ -401,13 +450,16 @@ def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual
                 application_scope=str(row.get("application_scope") or "ALL_GROUP"), verification_method=str(row.get("verification_method") or "학생증"),
                 eligibility_description=str(row.get("eligibility") or ""), start_date=start_date, end_date=end_date, status="pending", source="import",
             )
-            base, bonus, penalty, _score = benefit_score_components(partnership, scoring_rules)
-            partnership.benefit_base_score = base
-            partnership.benefit_bonus_score = bonus
-            partnership.benefit_condition_penalty = penalty
-            partnership.benefit_score_cached = 0
-            partnership.benefit_needs_review = True
-            partnership.benefit_review_note = "일괄등록 후 AI 혜택 분석 필요"
+            if ai_analysis:
+                _apply_import_ai_analysis(partnership, ai_analysis)
+            else:
+                base, bonus, penalty, _score = benefit_score_components(partnership, scoring_rules)
+                partnership.benefit_base_score = base
+                partnership.benefit_bonus_score = bonus
+                partnership.benefit_condition_penalty = penalty
+                partnership.benefit_score_cached = 0
+                partnership.benefit_needs_review = True
+                partnership.benefit_review_note = "일괄등록 후 AI 혜택 분석 필요"
             db.add(partnership)
         imported += 1
     batch = ImportBatch(filename=filename, status="committed", row_count=len(rows), errors_json=json.dumps([]))
