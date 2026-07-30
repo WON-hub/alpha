@@ -16,6 +16,7 @@ from app.services.ai import AIConfigurationError, AIServiceError, generate_store
 from app.models import Affiliation, ImportBatch, Partnership, Restaurant
 from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, resolve_place
 from app.services.recommendation import benefit_score_components
+from app.services.scoring_rules import load_scoring_rules
 
 
 COLUMN_ALIASES = {
@@ -347,6 +348,7 @@ def _number(value: Any, default: float = 0) -> float:
 
 def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual") -> dict[str, int]:
     imported = 0
+    scoring_rules = load_scoring_rules(db)
     skipped = 0
     for raw in rows:
         row = _normalise_import_row(raw)
@@ -399,11 +401,13 @@ def commit_rows(db: Session, rows: list[dict[str, Any]], filename: str = "manual
                 application_scope=str(row.get("application_scope") or "ALL_GROUP"), verification_method=str(row.get("verification_method") or "학생증"),
                 eligibility_description=str(row.get("eligibility") or ""), start_date=start_date, end_date=end_date, status="pending", source="import",
             )
-            base, bonus, penalty, score = benefit_score_components(partnership)
+            base, bonus, penalty, _score = benefit_score_components(partnership, scoring_rules)
             partnership.benefit_base_score = base
             partnership.benefit_bonus_score = bonus
             partnership.benefit_condition_penalty = penalty
-            partnership.benefit_score_cached = score
+            partnership.benefit_score_cached = 0
+            partnership.benefit_needs_review = True
+            partnership.benefit_review_note = "일괄등록 후 AI 혜택 분석 필요"
             db.add(partnership)
         imported += 1
     batch = ImportBatch(filename=filename, status="committed", row_count=len(rows), errors_json=json.dumps([]))

@@ -118,6 +118,9 @@ class PartnershipUpdate(BaseModel):
     fixed_discount: Optional[int] = Field(default=None, ge=0)
     eligibility_description: Optional[str] = None
     verification_method: Optional[str] = None
+    benefit_score_cached: Optional[float] = Field(default=None, ge=0, le=100)
+    benefit_needs_review: Optional[bool] = None
+    benefit_review_note: Optional[str] = None
 
 
 class PartnershipBulkApprove(BaseModel):

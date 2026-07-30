@@ -63,6 +63,8 @@ class Partnership(Base):
     benefit_condition_penalty: Mapped[float] = mapped_column(Float, default=0, nullable=False)
     benefit_score_cached: Mapped[float] = mapped_column(Float, default=20, nullable=False)
     benefit_preprocessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    benefit_needs_review: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    benefit_review_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     discount_rate: Mapped[float] = mapped_column(Float, default=0, nullable=False)
     fixed_discount: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     service_item: Mapped[str] = mapped_column(String(160), default="", nullable=False)
@@ -82,6 +84,23 @@ class Partnership(Base):
 
     restaurant: Mapped[Restaurant] = relationship(back_populates="partnerships")
     affiliation: Mapped[Affiliation] = relationship(back_populates="partnerships")
+
+
+class BenefitScoringRule(Base):
+    __tablename__ = "benefit_scoring_rules"
+    __table_args__ = (UniqueConstraint("rule_type", "rule_key", name="uq_benefit_scoring_rule"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rule_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    rule_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    keywords_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    min_value: Mapped[Optional[float]] = mapped_column(Float)
+    max_value: Mapped[Optional[float]] = mapped_column(Float)
+    score: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
 class Review(Base):

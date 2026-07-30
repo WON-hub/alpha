@@ -3,6 +3,7 @@ import { api } from "./api.js";
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
 let affiliations = [];
+let partnershipsById = new Map();
 
 function toast(message) {
   const node = $("#admin-toast");
@@ -25,6 +26,10 @@ function statusBadge(status) {
   return `<span class="status-badge status-${status}">${label}</span>`;
 }
 
+function reviewBadge(item) {
+  return item.benefit_needs_review ? '<span class="status-badge status-pending">혜택 확인 필요</span>' : '';
+}
+
 async function showDashboard() {
   const data = await api("/api/admin/dashboard");
   $("#view-dashboard").innerHTML = `<div class="dashboard-grid"><div class="stat-card"><span class="stat-icon">▤</span><div class="stat-label">운영 중인 제휴</div><div class="stat-value">${data.active_partnerships}</div><div class="stat-meta">현재 유효한 제휴</div></div><div class="stat-card"><span class="stat-icon">◷</span><div class="stat-label">승인 대기</div><div class="stat-value">${data.pending_partnerships}</div><div class="stat-meta">검토가 필요한 항목</div></div><div class="stat-card"><span class="stat-icon">⌁</span><div class="stat-label">누적 조회</div><div class="stat-value">${data.views.toLocaleString()}</div><div class="stat-meta">전체 업체 상세 조회</div></div><div class="stat-card"><span class="stat-icon">⚑</span><div class="stat-label">미처리 신고</div><div class="stat-value">${data.open_reports}</div><div class="stat-meta">확인이 필요한 신고</div></div></div><div class="admin-card"><h3 class="section-title">운영 알림</h3><div class="alert-list"><div class="alert-item"><span>30일 내 만료 예정 제휴</span>${data.expiring_partnerships ? `<strong class="status-badge status-pending">${data.expiring_partnerships}건</strong>` : '<span class="status-badge status-active">없음</span>'}</div><div class="alert-item"><span>실제 이용 인증</span><strong>${data.verified_uses.toLocaleString()}건</strong></div><div class="alert-item"><span>평균 별점</span><strong>★ ${data.average_rating.toFixed(2)}</strong></div></div></div>`;
@@ -33,11 +38,29 @@ async function showDashboard() {
 function partnershipRows(items) {
   return items.map((item) => {
     const benefit = item.benefit_display?.length ? item.benefit_display.join("\n") : (item.benefit_text || item.benefit_label || "제휴 혜택");
-    return `<tr><td>${item.status === "pending" ? `<input class="partnership-check bulk-checkbox" type="checkbox" data-id="${item.id}" aria-label="${escapeHtml(item.restaurant_name)} 선택" />` : ""}</td><td><strong>${escapeHtml(item.restaurant_name)}</strong><br /><span style="color:#8b959e">${escapeHtml(item.address)}</span></td><td>${escapeHtml(item.category)}</td><td>${escapeHtml(item.affiliation)}</td><td class="benefit-cell" style="white-space:normal;line-height:1.55;min-width:180px;color:#15263a;font-weight:600">${escapeHtml(benefit).replace(/\n/g, "<br />")}</td><td>${item.start_date} ~ ${item.end_date}</td><td>${statusBadge(item.status)}</td><td><button class="table-action approve" data-id="${item.id}">승인</button><button class="table-action end" data-id="${item.id}">종료</button></td></tr>`;
+    return `<tr><td>${item.status === "pending" ? `<input class="partnership-check bulk-checkbox" type="checkbox" data-id="${item.id}" aria-label="${escapeHtml(item.restaurant_name)} 선택" />` : ""}</td><td><strong>${escapeHtml(item.restaurant_name)}</strong><br /><span style="color:#8b959e">${escapeHtml(item.address)}</span></td><td>${escapeHtml(item.category)}</td><td>${escapeHtml(item.affiliation)}</td><td class="benefit-cell" style="white-space:normal;line-height:1.55;min-width:180px;color:#15263a;font-weight:600">${escapeHtml(benefit).replace(/\n/g, "<br />")}<br />${reviewBadge(item)}</td><td>${item.start_date} ~ ${item.end_date}</td><td>${statusBadge(item.status)}</td><td>${item.benefit_needs_review ? `<button class="table-action review-benefit" data-id="${item.id}">혜택 검토</button>` : ""}<button class="table-action approve" data-id="${item.id}">승인</button><button class="table-action end" data-id="${item.id}">종료</button></td></tr>`;
   }).join("") || '<tr><td colspan="8" style="text-align:center;color:#8b959e">등록된 제휴가 없습니다.</td></tr>';
 }
 
 function bindPartnershipActions() {
+  document.querySelectorAll(".review-benefit").forEach((button) => button.addEventListener("click", async () => {
+    const item = partnershipsById.get(Number(button.dataset.id));
+    if (!item) return;
+    const analysis = item.benefit_ai_json || {};
+    const defaultConditions = analysis.conditions?.join(" / ") || item.benefit_review_note || "";
+    const scoreText = window.prompt("관리자가 확정할 혜택 점수(B)를 0~100으로 입력하세요.", String(item.benefit_score_cached || 0));
+    if (scoreText === null) return;
+    const score = Number(scoreText);
+    if (!Number.isFinite(score) || score < 0 || score > 100) return toast("혜택 점수는 0~100 사이 숫자여야 합니다.");
+    const conditions = window.prompt("확정된 이용 조건을 / 로 구분해 입력하세요.", defaultConditions);
+    if (conditions === null) return;
+    const updatedAnalysis = { ...analysis, conditions: conditions.split("/").map((value) => value.trim()).filter(Boolean), conditionCount: conditions.split("/").map((value) => value.trim()).filter(Boolean).length, unknownBenefits: [], unknownConditions: [], needsReview: false, benefitScore: score };
+    try {
+      await api(`/api/admin/partnerships/${item.id}`, { method: "PUT", body: JSON.stringify({ benefit_ai_json: updatedAnalysis, eligibility_description: conditions, benefit_score_cached: score, benefit_needs_review: false, benefit_review_note: "" }) });
+      toast("혜택 점수와 조건을 저장했습니다.");
+      await showPartnerships();
+    } catch (error) { toast(error.message); }
+  }));
   document.querySelectorAll(".approve").forEach((button) => button.addEventListener("click", async () => {
     await api(`/api/admin/partnerships/${button.dataset.id}`, { method: "PUT", body: JSON.stringify({ status: "active" }) });
     toast("제휴를 승인했습니다.");
@@ -52,8 +75,9 @@ function bindPartnershipActions() {
 
 async function showPartnerships() {
   const data = await api("/api/admin/partnerships");
+  partnershipsById = new Map(data.items.map((item) => [item.id, item]));
   $("#view-partnerships").innerHTML = `<div class="toolbar"><div class="toolbar-left"><input id="partnership-search" placeholder="업체명 검색" /><select id="status-filter"><option value="all">전체 상태</option><option value="pending">승인 대기</option><option value="active">운영 중</option><option value="ended">종료</option></select><button id="export-csv" class="outline-button">CSV 다운로드</button></div><div class="toolbar-left"><button class="primary-button" id="bulk-approve" disabled>선택 항목 일괄 승인</button><button class="primary-button" id="go-new">+ 신규 제휴</button></div></div><div class="admin-card table-card"><table class="admin-table"><thead><tr><th><input id="select-all-partnerships" class="bulk-checkbox" type="checkbox" aria-label="승인 대기 전체 선택" /></th><th>업체명</th><th>카테고리</th><th>대상 소속</th><th>혜택</th><th>기간</th><th>상태</th><th>관리</th></tr></thead><tbody id="partnership-rows">${partnershipRows(data.items)}</tbody></table></div>`;
-  const renderRows = (items) => { $("#partnership-rows").innerHTML = partnershipRows(items); bindPartnershipActions(); wireBulkRows(); addPlaceRefreshButtons(); };
+  const renderRows = (items) => { items.forEach((item) => partnershipsById.set(item.id, item)); $("#partnership-rows").innerHTML = partnershipRows(items); bindPartnershipActions(); wireBulkRows(); addPlaceRefreshButtons(); };
   const wireBulkRows = () => {
     const boxes = [...document.querySelectorAll(".partnership-check")];
     const selectAll = $("#select-all-partnerships");
@@ -206,14 +230,14 @@ function showImport() {
   {
     $("#view-import").innerHTML = `<div class="admin-card"><div class="toolbar"><div><h3 class="section-title">광운대 제휴정보 일괄등록</h3><p class="helper">아래의 지정 양식을 다운로드해 작성한 뒤 업로드하세요. 엑셀 AI 형식 변환은 사용하지 않습니다.</p></div><a class="outline-button" href="/api/v1/admin/import/template">광운대 제휴정보 일괄등록용 다운로드</a></div><div class="ai-note">가게 정보는 등록 화면의 장소 검색에서, 혜택 분석은 혜택 문장 입력 후 AI 혜택 분석에서 처리합니다.</div><div class="file-drop"><div>지정 양식 파일을 선택하세요. xlsx, xls, xlsm, csv 지원</div><input id="import-file" type="file" accept=".xlsx,.xls,.xlsm,.csv" /></div><div class="ai-import-actions"><button id="preview-standard" class="outline-button" type="button">지정 양식 미리보기</button><button id="generate-summaries" class="outline-button" type="button">기존 매장 AI 요약 생성</button><button id="preprocess-benefits" class="outline-button" type="button">전체 혜택 AI 전처리</button></div><div id="import-preview" class="preview-wrap"></div></div>`;
     $("#preview-standard").addEventListener("click", () => previewImport("/api/admin/import/preview"));
-    $("#preprocess-benefits").addEventListener("click", async () => { try { const result = await api("/api/admin/ai/preprocess-benefits", { method: "POST" }); toast(`${result.processed}건 혜택을 전처리했습니다. 실패 ${result.failed}건`); } catch (error) { toast(error.message); } });
+    $("#preprocess-benefits").addEventListener("click", async () => { try { const result = await api("/api/admin/ai/preprocess-benefits", { method: "POST" }); toast(`${result.processed}건 전처리 완료 · 확인 필요 ${result.needs_review || 0}건 · 실패 ${result.failed}건`); } catch (error) { toast(error.message); } });
     $("#generate-summaries").addEventListener("click", async () => { try { const result = await api("/api/admin/ai/generate-summaries?force=true", { method: "POST" }); toast(`${result.generated}개 매장 요약을 생성했습니다.`); } catch (error) { toast(error.message); } });
     return;
   }
   $("#view-import").innerHTML = `<div class="admin-card"><div class="toolbar"><div><h3 class="section-title">광운대 제휴정보 일괄등록</h3><p class="helper">원본 Excel은 기본 형식 미리보기 또는 AI 형식 변환을 선택할 수 있습니다.</p></div><a class="outline-button" href="/api/v1/admin/import/template">광운대 제휴정보 일괄등록용 다운로드</a></div><div class="ai-note">AI 변환은 열 이름과 혜택 문장을 표준 형식으로 정리합니다. 변환 결과를 확인한 뒤 저장하세요. GEMINI_API_KEY가 없으면 기본 변환만 사용할 수 있습니다.</div><div class="file-drop"><div>파일을 선택하세요. xlsx, xls, xlsm, csv, txt 지원</div><input id="import-file" type="file" accept=".xlsx,.xls,.xlsm,.csv,.txt" /></div><div class="ai-import-actions"><button id="preview-standard" class="outline-button" type="button">기본 형식으로 미리보기</button><button id="preview-ai" class="primary-button" type="button">AI로 표준 형식 변환</button><button id="generate-summaries" class="outline-button" type="button">기존 매장 AI 요약 생성</button></div><div id="import-preview" class="preview-wrap"></div></div>`;
   $("#preview-standard").addEventListener("click", () => previewImport("/api/admin/import/preview"));
   $(".ai-import-actions").insertAdjacentHTML("beforeend", '<button id="preprocess-benefits" class="outline-button" type="button">전체 혜택 AI 전처리</button>');
-  $("#preprocess-benefits").addEventListener("click", async () => { try { const result = await api("/api/admin/ai/preprocess-benefits", { method: "POST" }); toast(`${result.processed}건 혜택을 전처리했습니다. 실패 ${result.failed}건`); } catch (error) { toast(error.message); } });
+  $("#preprocess-benefits").addEventListener("click", async () => { try { const result = await api("/api/admin/ai/preprocess-benefits", { method: "POST" }); toast(`${result.processed}건 전처리 완료 · 확인 필요 ${result.needs_review || 0}건 · 실패 ${result.failed}건`); } catch (error) { toast(error.message); } });
   $("#generate-summaries").addEventListener("click", async () => { try { const result = await api("/api/admin/ai/generate-summaries?force=true", { method: "POST" }); toast(`${result.generated}개 매장 요약을 생성했습니다.`); } catch (error) { toast(error.message); } });
 }
 

@@ -1,6 +1,8 @@
 from collections.abc import Generator
+import json
+from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -33,6 +35,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_optional_columns()
+    _ensure_scoring_rules()
 
 
 def _ensure_optional_columns() -> None:
@@ -64,6 +67,8 @@ def _ensure_optional_columns() -> None:
         "benefit_condition_penalty": "FLOAT NOT NULL DEFAULT 0",
         "benefit_score_cached": "FLOAT NOT NULL DEFAULT 20",
         "benefit_preprocessed_at": "TIMESTAMP",
+        "benefit_needs_review": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "benefit_review_note": "TEXT NOT NULL DEFAULT ''",
     }
     for column_name, column_definition in optional_partnership_columns.items():
         if column_name not in partnership_columns:
@@ -77,6 +82,41 @@ def _ensure_optional_columns() -> None:
         if column_name not in restaurant_columns:
             with engine.begin() as connection:
                 connection.execute(text(f"ALTER TABLE restaurants ADD COLUMN {column_name} {column_definition}"))
+
+
+def _ensure_scoring_rules() -> None:
+    """Seed the editable scoring-rule table from the versioned bootstrap JSON once."""
+    from app.models import BenefitScoringRule
+
+    config_path = Path(__file__).resolve().parents[1] / "config" / "benefit_scoring_rules.json"
+    if not config_path.exists():
+        return
+    with config_path.open(encoding="utf-8") as stream:
+        defaults = json.load(stream)
+    with SessionLocal() as db:
+        for item in defaults:
+            existing = db.scalar(
+                select(BenefitScoringRule).where(
+                    BenefitScoringRule.rule_type == item["rule_type"],
+                    BenefitScoringRule.rule_key == item["rule_key"],
+                )
+            )
+            if existing:
+                continue
+            db.add(
+                BenefitScoringRule(
+                    rule_type=item["rule_type"],
+                    rule_key=item["rule_key"],
+                    label=item["label"],
+                    keywords_json=json.dumps(item.get("keywords", []), ensure_ascii=False),
+                    min_value=item.get("min_value"),
+                    max_value=item.get("max_value"),
+                    score=item.get("score", 0),
+                    enabled=item.get("enabled", True),
+                    sort_order=item.get("sort_order", 0),
+                )
+            )
+        db.commit()
 
 
 def get_db() -> Generator[Session, None, None]:

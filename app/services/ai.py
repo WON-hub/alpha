@@ -130,10 +130,18 @@ Analyze this Korean partnership benefit sentence and return ONLY one JSON object
 Do not invent missing values. Use null for unknown numbers/text, [] for no conditions,
 and use a 0-100 benefitScore. The output keys must be exactly:
 benefitType, discountRate, discountAmount, freeItem, targetMenu, minimumOrder,
-availableTime, requiredPeople, studentVerification, conditions, conditionCount, benefitScore.
+availableTime, requiredPeople, studentVerification, conditions, conditionCount,
+benefitScore, unknownBenefits, unknownConditions, needsReview.
 discountRate is a percentage number such as 10 for 10%. discountAmount and minimumOrder
 are Korean won integers. studentVerification is true only when student ID or equivalent
 verification is explicitly required. conditions must contain the exact conditions found.
+unknownBenefits must contain exact benefit phrases that cannot be represented by the
+discountRate, discountAmount, freeItem, targetMenu, or benefitType fields.
+unknownConditions must contain exact conditions that cannot be represented by
+minimumOrder, availableTime, requiredPeople, studentVerification, or the conditions list.
+If either unknown list is non-empty, set needsReview to true. Also set needsReview to true
+when the sentence is ambiguous or the benefit amount cannot be safely interpreted.
+Never hide an unknown phrase just to produce a score.
 
 Original benefit text:
 {benefit_text}
@@ -141,4 +149,7 @@ Original benefit text:
     result = _json_from_text(_call_gemini(prompt))
     if not isinstance(result, dict):
         raise AIServiceError("AI가 혜택 분석 결과를 반환하지 않았습니다.")
+    result.setdefault("unknownBenefits", [])
+    result.setdefault("unknownConditions", [])
+    result["needsReview"] = bool(result.get("needsReview") or result["unknownBenefits"] or result["unknownConditions"])
     return result

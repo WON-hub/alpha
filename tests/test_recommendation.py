@@ -91,6 +91,13 @@ def test_report_benefit_bonus_adds_five_for_multiple_services():
     assert score == 65
 
 
+def test_unrecognized_benefit_requires_review_and_is_not_scored():
+    partnership = build_partnership(rate=20)
+    partnership.benefit_needs_review = True
+    _base, _bonus, _penalty, score = benefit_score_components(partnership)
+    assert score == 0
+
+
 def test_bayesian_satisfaction_uses_platform_prior_for_new_store():
     new_restaurant = Restaurant(rating_average=0, review_count=0)
     rated_restaurant = Restaurant(rating_average=5, review_count=10)

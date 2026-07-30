@@ -22,6 +22,7 @@ from app.services.import_service import commit_rows, enrich_missing_coordinates,
 from app.services.ai import AIConfigurationError, AIServiceError, analyze_benefit, generate_recommendation_reason, generate_store_summary
 from app.services.places import PlaceSearchConfigurationError, PlaceSearchError, search_places
 from app.services.recommendation import benefit_conditions, benefit_items, benefit_score_components, benefit_text, bayesian_satisfaction, public_benefit_label, recommend
+from app.services.scoring_rules import load_scoring_rules
 from app.security import get_admin_session, verify_password, create_admin_session, revoke_admin_session
 from app.schemas import AdminLogin, BenefitAnalyzeRequest, ImportCommit, PartnershipBulkApprove, PartnershipCreate, PartnershipUpdate, ReportUpdate
 
@@ -81,6 +82,9 @@ def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
     required_people = _analysis_value(analysis, "min_people", "requiredPeople")
     conditions = _analysis_value(analysis, "conditions", "conditions", []) or []
     student_verification = bool(_analysis_value(analysis, "student_verification", "studentVerification", False))
+    unknown_benefits = _analysis_value(analysis, "unknown_benefits", "unknownBenefits", []) or []
+    unknown_conditions = _analysis_value(analysis, "unknown_conditions", "unknownConditions", []) or []
+    needs_review = bool(_analysis_value(analysis, "needs_review", "needsReview", False) or unknown_benefits or unknown_conditions)
 
     def number(value, default=0):
         try:
@@ -102,6 +106,9 @@ def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
         partnership.eligibility_description = " / ".join(str(item) for item in conditions)
     if student_verification and not partnership.verification_method:
         partnership.verification_method = "학생증 제시"
+    partnership.benefit_needs_review = needs_review
+    review_items = [*(str(item) for item in unknown_benefits), *(str(item) for item in unknown_conditions)]
+    partnership.benefit_review_note = " / ".join(review_items) if review_items else ("AI 분석 결과 관리자 확인 필요" if needs_review else "")
 
     benefit_type = str(_analysis_value(analysis, "benefit_type", "benefitType", "discount") or "discount").lower()
     if rate not in (None, "", 0):
@@ -112,6 +119,15 @@ def _apply_benefit_analysis(partnership: Partnership, analysis: dict) -> None:
         partnership.benefit_type = "service"
     elif benefit_type in {"percentage", "fixed", "service", "discount"}:
         partnership.benefit_type = benefit_type
+
+
+def _cache_benefit_score(partnership: Partnership, scoring_rules) -> None:
+    base, bonus, penalty, score = benefit_score_components(partnership, scoring_rules)
+    partnership.benefit_base_score = base
+    partnership.benefit_bonus_score = bonus
+    partnership.benefit_condition_penalty = penalty
+    partnership.benefit_score_cached = 0 if partnership.benefit_needs_review else score
+    partnership.benefit_preprocessed_at = None if partnership.benefit_needs_review else datetime.utcnow()
 
 
 @router.get("/health")
@@ -230,7 +246,7 @@ def restaurant_detail(restaurant_id: int, db: Session = Depends(get_db)) -> Rest
 def recommendations(payload: RecommendationRequest, db: Session = Depends(get_db)) -> dict:
     restaurants_list = db.scalars(select(Restaurant).options(joinedload(Restaurant.partnerships))).unique().all()
     affiliations_list = db.scalars(select(Affiliation)).all()
-    results = recommend(payload, restaurants_list, affiliations_list)
+    results = recommend(payload, restaurants_list, affiliations_list, scoring_rules=load_scoring_rules(db))
     ai_recommendation = None
     if results:
         selected = dict(secrets.choice(results))
@@ -329,7 +345,7 @@ def admin_dashboard(request: Request, db: Session = Depends(get_db)) -> dict:
 
 
 def _partnership_row(partnership: Partnership) -> dict:
-    return {"id": partnership.id, "restaurant_id": partnership.restaurant_id, "restaurant_name": partnership.restaurant.name, "category": partnership.restaurant.category, "affiliation": partnership.affiliation.name, "affiliation_id": partnership.affiliation_id, "benefit_type": partnership.benefit_type, "benefit_text": partnership.benefit_text, "benefit_ai_json": _json_object(partnership.benefit_ai_json), "benefit_display": benefit_items(partnership), "benefit_label": public_benefit_label(partnership), "discount_rate": partnership.discount_rate, "fixed_discount": partnership.fixed_discount, "service_item": partnership.service_item, "estimated_cash_value": partnership.estimated_cash_value, "min_order_amount": partnership.min_order_amount, "min_people": partnership.min_people, "payment_method": partnership.payment_method, "application_scope": partnership.application_scope, "verification_method": partnership.verification_method, "start_date": partnership.start_date, "end_date": partnership.end_date, "status": partnership.status, "address": partnership.restaurant.address, "latitude": partnership.restaurant.latitude, "longitude": partnership.restaurant.longitude, "place_id": partnership.restaurant.place_id, "place_provider": partnership.restaurant.place_provider, "benefit_base_score": partnership.benefit_base_score, "benefit_bonus_score": partnership.benefit_bonus_score, "benefit_condition_penalty": partnership.benefit_condition_penalty, "benefit_score_cached": partnership.benefit_score_cached, "benefit_preprocessed_at": partnership.benefit_preprocessed_at}
+    return {"id": partnership.id, "restaurant_id": partnership.restaurant_id, "restaurant_name": partnership.restaurant.name, "category": partnership.restaurant.category, "affiliation": partnership.affiliation.name, "affiliation_id": partnership.affiliation_id, "benefit_type": partnership.benefit_type, "benefit_text": partnership.benefit_text, "benefit_ai_json": _json_object(partnership.benefit_ai_json), "benefit_display": benefit_items(partnership), "benefit_label": public_benefit_label(partnership), "discount_rate": partnership.discount_rate, "fixed_discount": partnership.fixed_discount, "service_item": partnership.service_item, "estimated_cash_value": partnership.estimated_cash_value, "min_order_amount": partnership.min_order_amount, "min_people": partnership.min_people, "payment_method": partnership.payment_method, "application_scope": partnership.application_scope, "verification_method": partnership.verification_method, "start_date": partnership.start_date, "end_date": partnership.end_date, "status": partnership.status, "address": partnership.restaurant.address, "latitude": partnership.restaurant.latitude, "longitude": partnership.restaurant.longitude, "place_id": partnership.restaurant.place_id, "place_provider": partnership.restaurant.place_provider, "benefit_base_score": partnership.benefit_base_score, "benefit_bonus_score": partnership.benefit_bonus_score, "benefit_condition_penalty": partnership.benefit_condition_penalty, "benefit_score_cached": partnership.benefit_score_cached, "benefit_preprocessed_at": partnership.benefit_preprocessed_at, "benefit_needs_review": partnership.benefit_needs_review, "benefit_review_note": partnership.benefit_review_note}
 
 
 @admin_router.get("/partnerships")
@@ -523,19 +539,17 @@ async def create_partnership(payload: PartnershipCreate, request: Request, db: S
         except (AIConfigurationError, AIServiceError):
             pass
     created = []
+    scoring_rules = load_scoring_rules(db)
     for affiliation_id in payload.affiliation_ids:
         if not db.get(Affiliation, affiliation_id):
             raise HTTPException(status_code=400, detail=f"소속 ID {affiliation_id}를 찾을 수 없습니다.")
         partnership = Partnership(restaurant_id=restaurant.id, affiliation_id=affiliation_id, benefit_type=payload.benefit_type, benefit_text=payload.benefit_text, benefit_ai_json=json.dumps(payload.benefit_ai_json, ensure_ascii=False), discount_rate=payload.discount_rate, fixed_discount=payload.fixed_discount, service_item=payload.service_item, estimated_cash_value=payload.estimated_cash_value, min_order_amount=payload.min_order_amount, min_people=payload.min_people, payment_method=payload.payment_method, application_scope=payload.application_scope, verification_method=payload.verification_method, eligibility_description=payload.eligibility_description, start_date=payload.start_date, end_date=payload.end_date, status=payload.status, source=payload.source)
         if payload.benefit_ai_json:
             _apply_benefit_analysis(partnership, payload.benefit_ai_json)
-        base, bonus, penalty, score = benefit_score_components(partnership)
-        partnership.benefit_base_score = base
-        partnership.benefit_bonus_score = bonus
-        partnership.benefit_condition_penalty = penalty
-        partnership.benefit_score_cached = score
-        if payload.benefit_ai_json:
-            partnership.benefit_preprocessed_at = datetime.utcnow()
+        else:
+            partnership.benefit_needs_review = True
+            partnership.benefit_review_note = "AI 혜택 분석 필요"
+        _cache_benefit_score(partnership, scoring_rules)
         db.add(partnership)
         created.append(partnership)
     db.commit()
@@ -548,19 +562,24 @@ def update_partnership(partnership_id: int, payload: PartnershipUpdate, request:
     partnership = db.get(Partnership, partnership_id)
     if not partnership:
         raise HTTPException(status_code=404, detail="제휴를 찾을 수 없습니다.")
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    manual_score = "benefit_score_cached" in changes
+    for key, value in changes.items():
         if key == "benefit_ai_json":
             value = json.dumps(value or {}, ensure_ascii=False)
         setattr(partnership, key, value)
     if "benefit_ai_json" in payload.model_fields_set and payload.benefit_ai_json:
         _apply_benefit_analysis(partnership, payload.benefit_ai_json)
-    if any(key in payload.model_fields_set for key in {"benefit_text", "benefit_type", "discount_rate", "fixed_discount", "service_item", "estimated_cash_value", "min_order_amount", "min_people", "payment_method", "eligibility_description", "verification_method", "benefit_ai_json"}):
-        base, bonus, penalty, score = benefit_score_components(partnership)
-        partnership.benefit_base_score = base
-        partnership.benefit_bonus_score = bonus
-        partnership.benefit_condition_penalty = penalty
-        partnership.benefit_score_cached = score
-        partnership.benefit_preprocessed_at = datetime.utcnow() if payload.benefit_ai_json else None
+    scoring_fields = {"benefit_text", "benefit_type", "discount_rate", "fixed_discount", "service_item", "estimated_cash_value", "min_order_amount", "min_people", "payment_method", "eligibility_description", "verification_method", "benefit_ai_json"}
+    if any(key in payload.model_fields_set for key in scoring_fields):
+        if not payload.benefit_ai_json and "benefit_ai_json" in payload.model_fields_set:
+            partnership.benefit_needs_review = True
+            partnership.benefit_review_note = "AI 혜택 분석 필요"
+        if not manual_score:
+            _cache_benefit_score(partnership, load_scoring_rules(db))
+    if manual_score:
+        partnership.benefit_score_cached = max(0, min(100, float(partnership.benefit_score_cached or 0)))
+        partnership.benefit_preprocessed_at = datetime.utcnow() if not partnership.benefit_needs_review else None
     db.commit()
     return {"ok": True}
 
@@ -681,6 +700,8 @@ def preprocess_benefits(request: Request, db: Session = Depends(get_db)) -> dict
     partnerships = db.scalars(select(Partnership)).all()
     processed = 0
     failed = 0
+    needs_review = 0
+    scoring_rules = load_scoring_rules(db)
     for partnership in partnerships:
         raw_text = benefit_text(partnership)
         try:
@@ -688,12 +709,9 @@ def preprocess_benefits(request: Request, db: Session = Depends(get_db)) -> dict
             _apply_benefit_analysis(partnership, extracted)
             partnership.benefit_ai_json = json.dumps(extracted, ensure_ascii=False)
             partnership.benefit_text = raw_text
-            base, bonus, penalty, score = benefit_score_components(partnership)
-            partnership.benefit_base_score = base
-            partnership.benefit_bonus_score = bonus
-            partnership.benefit_condition_penalty = penalty
-            partnership.benefit_score_cached = score
-            partnership.benefit_preprocessed_at = datetime.utcnow()
+            _cache_benefit_score(partnership, scoring_rules)
+            if partnership.benefit_needs_review:
+                needs_review += 1
             processed += 1
         except (AIServiceError, AIConfigurationError):
             failed += 1
@@ -708,7 +726,7 @@ def preprocess_benefits(request: Request, db: Session = Depends(get_db)) -> dict
         restaurant.bayesian_satisfaction_score = bayesian_satisfaction(restaurant, platform_mean)
         restaurant.satisfaction_preprocessed_at = datetime.utcnow()
     db.commit()
-    return {"ok": True, "processed": processed, "failed": failed}
+    return {"ok": True, "processed": processed, "failed": failed, "needs_review": needs_review}
 
 
 @admin_router.get("/reports")

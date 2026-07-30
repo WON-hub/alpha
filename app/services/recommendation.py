@@ -7,6 +7,7 @@ from math import atan2, cos, radians, sin, sqrt
 
 from app.models import Affiliation, Partnership, Restaurant
 from app.schemas import GroupIn, RecommendationRequest
+from app.services.scoring_rules import ScoringRule, load_default_scoring_rules
 
 
 FIXED_BUDGET_PER_PERSON = 12_000
@@ -101,84 +102,75 @@ def _service_text(partnership: Partnership) -> str:
     ).lower()
 
 
-def _benefit_base_score(partnership: Partnership) -> int:
+def _rules_for(rules: list[ScoringRule] | None, rule_type: str) -> list[ScoringRule]:
+    active = rules if rules is not None else load_default_scoring_rules()
+    return [rule for rule in active if rule.rule_type == rule_type]
+
+
+def _value_rule(rules: list[ScoringRule] | None, rule_type: str, value: float) -> ScoringRule | None:
+    return next((rule for rule in _rules_for(rules, rule_type) if rule.matches_value(value)), None)
+
+
+def _rule_score(rules: list[ScoringRule] | None, rule_type: str, rule_key: str, fallback: float = 0) -> float:
+    return next((rule.score for rule in _rules_for(rules, rule_type) if rule.rule_key == rule_key), fallback)
+
+
+def _benefit_base_score(partnership: Partnership, rules: list[ScoringRule] | None = None) -> int:
     scores: list[int] = []
     rate = float(partnership.discount_rate or 0)
-    if rate >= 20:
-        scores.append(100)
-    elif rate >= 10:
-        scores.append(80)
-    elif rate >= 5:
-        scores.append(60)
-    elif rate >= 2:
-        scores.append(40)
-    elif rate > 0:
-        scores.append(20)
+    if rate > 0:
+        rule = _value_rule(rules, "discount_rate", rate)
+        if rule:
+            scores.append(int(rule.score))
 
     fixed = max(int(partnership.fixed_discount or 0), int(partnership.estimated_cash_value or 0))
-    if fixed >= 2_000:
-        scores.append(80)
-    elif fixed >= 1_000:
-        scores.append(60)
-    elif fixed >= 500:
-        scores.append(40)
-    elif fixed > 0:
-        scores.append(20)
+    if fixed > 0:
+        rule = _value_rule(rules, "fixed_discount", fixed)
+        if rule:
+            scores.append(int(rule.score))
 
     text = _service_text(partnership)
-    if any(token in text for token in ("대표 메뉴 무료", "메뉴 무료", "1+1", "1 + 1")):
-        scores.append(100)
-    elif any(token in text for token in ("2+1", "3+1", "2 + 1", "3 + 1")):
-        scores.append(80)
-    elif any(token in text for token in ("음료", "사이드", "라면", "감자튀김", "무료 이용시간")):
-        scores.append(60)
-    elif any(token in text for token in ("토핑", "사리", "소스", "사이즈업", "7+1", "7 + 1")):
-        scores.append(40)
+    text_rules = _rules_for(rules, "benefit_text")
+    matched_text_rule = next((rule for rule in text_rules if rule.matches_text(text)), None)
+    if matched_text_rule:
+        scores.append(int(matched_text_rule.score))
     elif partnership.service_item or partnership.benefit_type:
-        scores.append(20)
+        fallback_rule = next((rule for rule in text_rules if not rule.keywords), None)
+        scores.append(int(fallback_rule.score if fallback_rule else 20))
     return max(scores, default=20)
 
 
-def _condition_penalty(partnership: Partnership) -> int:
+def _condition_penalty(partnership: Partnership, rules: list[ScoringRule] | None = None) -> int:
     text = " ".join(
         str(value or "")
         for value in (partnership.benefit_text, partnership.eligibility_description, partnership.verification_method, partnership.payment_method)
     ).lower()
-    rules = (
-        (("특정 메뉴", "세트만", "메뉴 제외", "제외 메뉴"), 10),
-        (("특정 시간", "특정 요일", "평일만", "주말만"), 10),
-        (("최소 주문", "최소금액", "최소 금액"), 10),
-        (("최소 주문수량", "최소 수량", "이용시간", "방문 인원"), 10),
-        (("10회", "10번", "재방문"), 10),
-        (("현금", "계좌이체"), 5),
-        (("리뷰 작성", "리뷰 필요"), 5),
-        (("전화예약", "전화 예약"), 5),
-        (("첫 주문", "첫 방문"), 5),
-        (("테이크아웃", "포장만", "매장 이용 제한"), 5),
-    )
-    penalty = sum(points for keywords, points in rules if any(keyword in text for keyword in keywords))
+    penalty = sum(rule.score for rule in _rules_for(rules, "condition") if rule.matches_text(text))
     if partnership.min_order_amount:
         penalty += 10
     if partnership.min_people > 1:
         penalty += 10
-    return min(20, penalty)
+    return int(min(_rule_score(rules, "condition_cap", "maximum_penalty", 20), penalty))
 
 
-def benefit_score_components(partnership: Partnership) -> tuple[float, float, float, float]:
+def benefit_score_components(partnership: Partnership, rules: list[ScoringRule] | None = None) -> tuple[float, float, float, float]:
     """Return base, bonus, condition penalty, and uncapped application score."""
-    base = float(_benefit_base_score(partnership))
+    base = float(_benefit_base_score(partnership, rules))
     text = _service_text(partnership)
     has_discount = bool(partnership.discount_rate or partnership.fixed_discount)
     has_service = bool(partnership.service_item or any(token in text for token in ("음료", "사이드", "서비스")))
-    bonus = 5.0 if has_discount and has_service else 0.0
+    bonus = _rule_score(rules, "bonus", "discount_and_service", 5) if has_discount and has_service else 0.0
     if not any(token in text for token in ("또는", "택1", "택 1")):
         benefit_parts = [part for part in re.split(r"(?:\r?\n|;|①|②|③|④)", benefit_text(partnership)) if part.strip()]
-        bonus = max(bonus, float(max(0, len(benefit_parts) - 1) * 5))
-        service_tokens = ("음료", "사이드", "라면", "감자", "토핑", "사리", "소스", "사이즈업", "계란", "콜라", "치즈", "만두", "떡")
-        service_count = sum(token in text for token in service_tokens)
-        bonus = max(bonus, float(max(0, service_count - 1) * 5))
-    penalty = float(_condition_penalty(partnership))
+        additional_rule = next((rule for rule in _rules_for(rules, "bonus") if rule.rule_key == "additional_service"), None)
+        if additional_rule:
+            service_count = sum(keyword in text for keyword in additional_rule.keywords)
+            bonus = max(bonus, float(max(0, len(benefit_parts) - 1) * additional_rule.score))
+            bonus = max(bonus, float(max(0, service_count - 1) * additional_rule.score))
+    penalty = float(_condition_penalty(partnership, rules))
     score = max(0.0, min(100.0, base + bonus - penalty))
+    if partnership.benefit_needs_review:
+        score = 0.0
     return base, bonus, penalty, score
 
 
@@ -188,11 +180,13 @@ def _application_ratio(partnership: Partnership, eligible: EligibleGroup) -> flo
     return eligible.count / eligible.total if eligible.total else 0.0
 
 
-def calculate_benefit_score(partnership: Partnership, eligible: EligibleGroup) -> float:
+def calculate_benefit_score(partnership: Partnership, eligible: EligibleGroup, rules: list[ScoringRule] | None = None) -> float:
+    if partnership.benefit_needs_review:
+        return 0.0
     if partnership.benefit_preprocessed_at:
         score = float(partnership.benefit_score_cached or 0)
     else:
-        score = benefit_score_components(partnership)[3]
+        score = benefit_score_components(partnership, rules)[3]
     return min(100, score * _application_ratio(partnership, eligible))
 
 
@@ -324,6 +318,7 @@ def recommend(
     restaurants: list[Restaurant],
     affiliations: list[Affiliation],
     as_of: date | None = None,
+    scoring_rules: list[ScoringRule] | None = None,
 ) -> list[dict]:
     affiliations_by_id = {affiliation.id: affiliation for affiliation in affiliations}
     platform_mean = _platform_mean(restaurants)
@@ -342,12 +337,14 @@ def recommend(
         satisfaction = float(restaurant.bayesian_satisfaction_score or 0) if restaurant.satisfaction_preprocessed_at else bayesian_satisfaction(restaurant, platform_mean)
         valid_partnerships = [partnership for partnership in restaurant.partnerships if is_partnership_valid(partnership, current)]
         for partnership in valid_partnerships:
+            if partnership.benefit_needs_review:
+                continue
             if request.payment_method and partnership.payment_method and partnership.payment_method != request.payment_method:
                 continue
             eligible = resolve_eligible_group(partnership, request.groups, affiliations_by_id)
             if eligible is None or total_people < partnership.min_people or estimated_total < partnership.min_order_amount:
                 continue
-            benefit = calculate_benefit_score(partnership, eligible)
+            benefit = calculate_benefit_score(partnership, eligible, scoring_rules)
             distance = distance_score(distance_m)
             cdi = (
                 benefit * CDI_BENEFIT_WEIGHT

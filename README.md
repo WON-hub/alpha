@@ -188,3 +188,28 @@ node --check app/static/js/admin.js
 2. 원본 제휴 엑셀은 9개 표준 컬럼으로 정리했습니다.
 3. AI가 혜택 원문을 분석하고, Supabase에 구조화 JSON과 B·S 점수를 저장했습니다.
 4. 최종 CDI의 D는 사용자 위치에 따라 달라지므로 추천 시점에 계산합니다.
+5. [`Benefit_example.csv`](docs/presentation-data/Benefit_example.csv)에서 실제 DB 한 매장의 AI 전처리 결과를 확인할 수 있습니다.
+
+## 혜택 점수 안전 처리
+
+혜택 점수 기준은 코드에 흩어져 있지 않고 Supabase의 `benefit_scoring_rules` 테이블에서 관리합니다. 초기 규칙은 [`config/benefit_scoring_rules.json`](config/benefit_scoring_rules.json)을 기준으로 앱 시작 시 테이블에 한 번 등록됩니다.
+
+Gemini 혜택 분석 JSON에는 다음 검토용 필드가 포함됩니다.
+
+- `unknownBenefits`: 기존 점수 규칙으로 표현할 수 없는 혜택 문장
+- `unknownConditions`: 기존 조건 필드로 표현할 수 없는 이용 조건
+- `needsReview`: 자동 점수화를 중단하고 관리자 확인을 요구하는지 여부
+
+새로운 혜택이나 조건이 발견되면 해당 제휴는 추천에서 제외되고 점수 B는 0으로 저장됩니다. 관리자는 관리자 화면의 **혜택 검토** 버튼에서 조건과 확정 점수 B를 수정한 뒤 저장할 수 있습니다. 확인이 끝난 제휴만 다시 추천 대상이 됩니다.
+
+## 발표용 전처리 예시와 더미 리뷰
+
+[`docs/presentation-data/Benefit_example.csv`](docs/presentation-data/Benefit_example.csv)는 Supabase의 `restaurant_id=174`인 수해복마라탕을 예시로, 원본 혜택 → AI 분석 JSON → B 점수 구성요소 → 베이즈 만족도 S가 저장되는 흐름을 한 행으로 보여줍니다.
+
+발표·로컬 검증용 리뷰가 필요할 때는 다음 명령을 사용합니다.
+
+```powershell
+python -m scripts.seed_dummy_reviews --apply
+```
+
+이 스크립트는 기존 리뷰를 보존하면서 활성 매장마다 3~8개의 리뷰를 추가하고, `[더미 리뷰]` 표시를 붙인 뒤 별점·리뷰 수·베이즈 만족도 S를 다시 계산합니다. 더미 데이터는 실제 사용자 의견이 아닌 시연·테스트용 데이터입니다.
