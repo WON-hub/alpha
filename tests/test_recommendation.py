@@ -4,6 +4,7 @@ from app.models import Affiliation, Partnership, Restaurant
 from app.schemas import GroupIn, LocationIn, RecommendationRequest
 from app.services.recommendation import (
     bayesian_satisfaction,
+    benefit_grade,
     calculate_savings,
     distance_score,
     is_partnership_valid,
@@ -70,6 +71,15 @@ def test_distance_bands_are_discrete():
     assert distance_score(150) == 40
     assert distance_score(250) == 20
     assert distance_score(500) == 0
+
+
+def test_benefit_grade_thresholds_are_relaxed():
+    assert benefit_grade(65)[0] == "황금밥알"
+    assert benefit_grade(64.9)[0] == "은빛밥알"
+    assert benefit_grade(50)[0] == "은빛밥알"
+    assert benefit_grade(49.9)[0] == "고운밥알"
+    assert benefit_grade(30)[0] == "고운밥알"
+    assert benefit_grade(29.9)[0] == "한톨밥알"
 
 
 def test_bayesian_satisfaction_uses_platform_prior_for_new_store():

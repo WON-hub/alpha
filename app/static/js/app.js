@@ -69,7 +69,6 @@ function refreshMap(results = []) {
   state.markers = results.map((result, index) => {
     const icon = L.divIcon({ className: "rank-marker", html: `<span>${index + 1}</span>`, iconSize: [29, 29], iconAnchor: [14, 14] });
     const marker = L.marker([result.latitude, result.longitude], { icon }).addTo(state.map);
-    marker.bindPopup(`<strong>${escapeHtml(result.name)}</strong><br /><span>${escapeHtml(result.ai_store_summary)}</span><br /><small>${escapeHtml(result.benefit_items.join(" · "))}</small>`);
     marker.on("click", () => openDetail(result.id));
     return marker;
   });
@@ -109,7 +108,6 @@ function renderResults(results = state.results) {
       const result = [state.aiRecommendation, ...state.results].filter(Boolean).find((item) => item.id === id);
       if (result) {
         state.map.setView([result.latitude, result.longitude], 17);
-        state.markers[[state.aiRecommendation, ...state.results].filter(Boolean).indexOf(result)]?.openPopup();
       }
     });
     card.querySelector(".detail-action").addEventListener("click", () => openDetail(id));

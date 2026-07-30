@@ -268,11 +268,11 @@ def public_benefit_label(partnership: Partnership) -> str:
 
 
 def benefit_grade(score: float) -> tuple[str, str]:
-    if score >= 80:
+    if score >= 65:
         return "황금밥알", "🌟🍚"
-    if score >= 60:
+    if score >= 50:
         return "은빛밥알", "✨🍚"
-    if score >= 40:
+    if score >= 30:
         return "고운밥알", "🌸🍚"
     return "한톨밥알", "🍚"
 
