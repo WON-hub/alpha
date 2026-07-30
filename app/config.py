@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     kakao_rest_api_key: str = ""
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.5-flash"
+    gemini_fallback_model: str = "gemini-3.5-flash-lite"
     seed_on_startup: bool = True
     campus_lat: float = 37.6194
     campus_lng: float = 127.0598

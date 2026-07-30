@@ -29,28 +29,44 @@ def _call_gemini(prompt: str, *, use_search: bool = False) -> str:
     settings = get_settings()
     if not settings.gemini_api_key:
         raise AIConfigurationError("GEMINI_API_KEY가 설정되지 않았습니다.")
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent"
     body: dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048},
     }
     if use_search:
         body["tools"] = [{"google_search": {}}]
-    try:
-        response = httpx.post(
-            endpoint,
-            headers={"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"},
-            json=body,
-            timeout=30,
-        )
-    except httpx.HTTPError as exc:
-        raise AIServiceError("AI 서버에 연결하지 못했습니다.") from exc
-    if response.status_code >= 400:
-        raise AIServiceError(f"AI 요청이 실패했습니다. ({response.status_code})")
-    text = _extract_text(response.json())
-    if not text:
-        raise AIServiceError("AI 응답이 비어 있습니다.")
-    return text
+    models = [settings.gemini_model.strip()]
+    fallback_model = settings.gemini_fallback_model.strip()
+    if fallback_model and fallback_model not in models:
+        models.append(fallback_model)
+
+    last_status: int | None = None
+    for index, model in enumerate(models):
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            response = httpx.post(
+                endpoint,
+                headers={"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"},
+                json=body,
+                timeout=30,
+            )
+        except httpx.HTTPError as exc:
+            if index < len(models) - 1:
+                continue
+            raise AIServiceError("AI 서버에 연결하지 못했습니다.") from exc
+
+        last_status = response.status_code
+        if response.status_code >= 400:
+            # 모델 과부하·일시 장애·지원되지 않는 모델이면 보조 모델로 재시도합니다.
+            if response.status_code in {404, 429, 500, 502, 503, 504} and index < len(models) - 1:
+                continue
+            raise AIServiceError(f"AI 요청이 실패했습니다. ({response.status_code})")
+        text = _extract_text(response.json())
+        if not text:
+            raise AIServiceError("AI 응답이 비어 있습니다.")
+        return text
+
+    raise AIServiceError(f"AI 요청이 실패했습니다. ({last_status or 503})")
 
 
 def _json_from_text(text: str) -> Any:
