@@ -76,12 +76,12 @@ def test_distance_bands_are_discrete():
 
 
 def test_benefit_grade_thresholds_match_report():
-    assert benefit_grade(80)[0] == "황금밥알"
-    assert benefit_grade(79.9)[0] == "은빛밥알"
-    assert benefit_grade(60)[0] == "은빛밥알"
-    assert benefit_grade(59.9)[0] == "고운밥알"
-    assert benefit_grade(40)[0] == "고운밥알"
-    assert benefit_grade(39.9)[0] == "한톨밥알"
+    assert benefit_grade(65)[0] == "황금밥알"
+    assert benefit_grade(64.9)[0] == "은빛밥알"
+    assert benefit_grade(50)[0] == "은빛밥알"
+    assert benefit_grade(49.9)[0] == "고운밥알"
+    assert benefit_grade(30)[0] == "고운밥알"
+    assert benefit_grade(29.9)[0] == "한톨밥알"
 
 
 def test_report_benefit_bonus_adds_five_for_multiple_services():

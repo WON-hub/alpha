@@ -12,6 +12,9 @@ from app.schemas import GroupIn, RecommendationRequest
 FIXED_BUDGET_PER_PERSON = 12_000
 MIN_REVIEW_COUNT = 10
 DEFAULT_PLATFORM_SATISFACTION = 60.0
+CDI_BENEFIT_WEIGHT = 0.53
+CDI_DISTANCE_WEIGHT = 0.27
+CDI_SATISFACTION_WEIGHT = 0.20
 
 DISTANCE_BANDS = (
     (100, 5),
@@ -276,11 +279,11 @@ def public_benefit_label(partnership: Partnership) -> str:
 
 
 def benefit_grade(score: float) -> tuple[str, str]:
-    if score >= 80:
+    if score >= 65:
         return "황금밥알", "🌟🍚"
-    if score >= 60:
+    if score >= 50:
         return "은빛밥알", "✨🍚"
-    if score >= 40:
+    if score >= 30:
         return "고운밥알", "🌸🍚"
     return "한톨밥알", "🍚"
 
@@ -346,7 +349,11 @@ def recommend(
                 continue
             benefit = calculate_benefit_score(partnership, eligible)
             distance = distance_score(distance_m)
-            cdi = benefit * 0.53 + distance * 0.27 + satisfaction * 0.20
+            cdi = (
+                benefit * CDI_BENEFIT_WEIGHT
+                + distance * CDI_DISTANCE_WEIGHT
+                + satisfaction * CDI_SATISFACTION_WEIGHT
+            )
             savings = calculate_savings(partnership, budget_per_person, eligible)
             grade, emoji = benefit_grade(benefit)
             candidate = {
