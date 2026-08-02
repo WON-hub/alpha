@@ -18,13 +18,11 @@ CDI_DISTANCE_WEIGHT = 0.27
 CDI_SATISFACTION_WEIGHT = 0.20
 
 DISTANCE_BANDS = (
-    (100, 5),
-    (200, 4),
-    (400, 3),
-    (600, 2),
-    # The report omits 600-700m; use the report's 1-point band continuously
-    # through 1000m so no distance falls into an undefined interval.
-    (1000, 1),
+    (50, 100),
+    (100, 80),
+    (150, 60),
+    (250, 40),
+    (500, 20),
 )
 
 
