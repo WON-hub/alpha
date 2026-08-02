@@ -66,16 +66,16 @@ def test_application_scope_and_fixed_budget_savings():
 
 def test_distance_bands_are_discrete():
     assert distance_score(0) == 100
-    assert distance_score(49.9) == 100
-    assert distance_score(50) == 80
-    assert distance_score(99.9) == 80
-    assert distance_score(100) == 60
-    assert distance_score(149.9) == 60
-    assert distance_score(150) == 40
-    assert distance_score(249.9) == 40
-    assert distance_score(250) == 20
-    assert distance_score(499.9) == 20
-    assert distance_score(500) == 0
+    assert distance_score(99.9) == 100
+    assert distance_score(100) == 90
+    assert distance_score(199.9) == 90
+    assert distance_score(200) == 80
+    assert distance_score(399.9) == 80
+    assert distance_score(400) == 70
+    assert distance_score(599.9) == 70
+    assert distance_score(600) == 60
+    assert distance_score(999.9) == 60
+    assert distance_score(1_000) == 50
 
 
 def test_benefit_grade_thresholds_match_report():
