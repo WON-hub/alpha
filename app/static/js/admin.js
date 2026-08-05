@@ -1,4 +1,4 @@
-import { api } from "./api.js";
+import { api } from "./api.js?v=20260730-1";
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -207,6 +207,104 @@ function showNew() {
   });
 }
 
+function numericAnalysisValue(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const match = String(value).replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : fallback;
+}
+
+function scoreRuleRows(rules, sign) {
+  return (Array.isArray(rules) ? rules : []).map((rule) => {
+    const score = numericAnalysisValue(rule.score);
+    const evidence = rule.evidence ? `<small>${escapeHtml(rule.evidence)}</small>` : "";
+    return `<li><div><strong>${escapeHtml(rule.label || rule.ruleKey || "적용 규칙")}</strong>${evidence}</div><span class="benefit-rule-score ${sign === "-" ? "negative" : "positive"}">${sign}${score}점</span></li>`;
+  }).join("");
+}
+
+function renderBenefitAnalysisCard(analysis) {
+  const rate = numericAnalysisValue(analysis.discountRate);
+  const amount = numericAnalysisValue(analysis.discountAmount);
+  const targetMenu = analysis.targetMenu || "해당 메뉴";
+  const summary = rate ? `${targetMenu} ${rate}% 할인` : amount ? `${targetMenu} ${amount.toLocaleString()}원 할인` : analysis.freeItem ? `${analysis.freeItem} 제공` : (analysis.benefitType || "혜택 내용 확인 필요");
+  const benefitRules = scoreRuleRows(analysis.matchedBenefitRules, "+") || '<li class="benefit-rule-empty">적용된 기본 혜택 규칙이 없습니다.</li>';
+  const bonusRules = scoreRuleRows(analysis.matchedBonusRules, "+") || '<li class="benefit-rule-empty">추가 가산 규칙이 없습니다.</li>';
+  const conditionRules = scoreRuleRows(analysis.matchedConditionRules, "-");
+  const verificationRow = analysis.studentVerification ? '<li><div><strong>학생증 제시</strong><small>학생 인증 조건</small></div><span class="benefit-rule-score neutral">+0점</span></li>' : "";
+  const conditionRows = verificationRow + (conditionRules || '<li class="benefit-rule-empty">조건 감점이 없습니다.</li>');
+  const unknowns = [...(analysis.unknownBenefits || []), ...(analysis.unknownConditions || [])].filter(Boolean);
+  const reviewBox = analysis.needsReview || unknowns.length
+    ? `<div class="benefit-analysis-warning"><strong>관리자 확인 필요</strong><span>${escapeHtml(unknowns.join(" / ") || "AI가 확정하지 못한 혜택 또는 조건이 있습니다.")}</span></div>`
+    : '<div class="benefit-analysis-ok">분류 체계에 맞춰 자동 산출되었습니다.</div>';
+  const baseScore = numericAnalysisValue(analysis.baseScore ?? analysis.benefitBaseScore);
+  const bonusScore = numericAnalysisValue(analysis.bonusScore ?? analysis.benefitBonusScore);
+  const penalty = numericAnalysisValue(analysis.conditionPenalty ?? analysis.benefitConditionPenalty);
+  const finalScore = numericAnalysisValue(analysis.finalBenefitScore ?? analysis.benefitScore);
+  return `<div class="benefit-analysis-card"><div class="benefit-analysis-header"><div><span class="benefit-analysis-kicker">AI 혜택 분석</span><h4>${escapeHtml(summary)}</h4></div><span class="benefit-analysis-status">분석 완료</span></div>${reviewBox}<section class="benefit-analysis-section"><h5>적용된 혜택 규칙</h5><ul class="benefit-rule-list">${benefitRules}</ul><h5>추가 가산 규칙</h5><ul class="benefit-rule-list">${bonusRules}</ul><h5>적용 조건 및 감점</h5><ul class="benefit-rule-list">${conditionRows}</ul></section><section class="benefit-score-summary"><div><span>기본 혜택</span><strong>${baseScore}점</strong></div><div><span>추가 가산</span><strong>+${bonusScore}점</strong></div><div><span>조건 감점</span><strong class="negative">-${penalty}점</strong></div><div class="final"><span>최종 혜택 점수</span><strong>${finalScore}점</strong></div></section><details class="benefit-analysis-details"><summary>상세 분석 JSON 보기</summary><pre>${escapeHtml(JSON.stringify(analysis, null, 2))}</pre></details></div>`;
+}
+
+function showNewEnhanced() {
+  $("#view-new").innerHTML = `<div class="admin-card form-card"><h3 class="section-title">신규 제휴 등록</h3><p class="helper">가게 정보 검색은 이 화면에서만 외부 장소 API를 1회 호출합니다. 검색 결과를 선택하면 주소·좌표·전화번호가 자동 입력됩니다.</p><form id="new-partnership-form"><div class="form-grid"><div class="form-field full"><label>가게 이름</label><div style="display:flex;gap:8px"><input name="restaurant_name" required placeholder="예: 새식당" style="flex:1" /><button id="search-place" class="outline-button" type="button">가게 정보 검색</button></div><div id="place-search-results" style="display:grid;gap:8px;margin-top:10px"></div><input type="hidden" name="restaurant_id" /><input type="hidden" name="place_id" /><input type="hidden" name="place_provider" /></div><div class="form-field"><label>카테고리</label><input name="category" value="식사류" required /></div><div class="form-field"><label>주소</label><input name="address" placeholder="검색 결과에서 자동 입력" /></div><div class="form-field"><label>전화번호</label><input name="phone" /></div><div class="form-field"><label>위도</label><input name="latitude" type="number" step="any" /></div><div class="form-field"><label>경도</label><input name="longitude" type="number" step="any" /></div><div class="form-field"><label>영업시간</label><input name="opening_hours" placeholder="선택 입력" /></div><div class="form-field"><label>대표 메뉴/설명</label><input name="menu_summary" placeholder="선택 입력" /></div><div class="form-field full"><label>제휴 대상 소속</label><select name="affiliation_ids" multiple size="5" required>${affiliationOptions()}</select><p class="helper">Ctrl/Cmd를 눌러 여러 소속을 선택할 수 있습니다.</p></div><div class="form-field full"><label>제휴 혜택 원문</label><textarea name="benefit_text" placeholder="예: 학생증 제시 시 평일 오후 2시 이후 음료 1잔 무료" required></textarea><div style="display:flex;align-items:center;gap:10px;margin-top:8px"><button id="analyze-benefit" class="outline-button" type="button">AI 혜택 분석</button><span class="helper">분석 결과를 확인·수정한 뒤 저장할 수 있습니다.</span></div><div id="benefit-analysis-preview" class="benefit-analysis" hidden></div><pre id="benefit-analysis-json" hidden></pre></div><div class="form-field"><label>혜택 유형</label><select name="benefit_type"><option value="percentage">비율 할인</option><option value="fixed">정액 할인</option><option value="service">서비스 제공</option><option value="discount">기타 혜택</option></select></div><div class="form-field"><label>적용 범위</label><select name="application_scope"><option value="ALL_GROUP">일행 전체 적용</option><option value="ELIGIBLE_MEMBERS_ONLY">대상자에게만 적용</option><option value="ONCE_PER_ORDER">주문당 1회 적용</option></select></div><div class="form-field"><label>할인율 (%)</label><input name="discount_rate" type="number" min="0" max="100" value="0" /></div><div class="form-field"><label>정액 할인 (원)</label><input name="fixed_discount" type="number" min="0" value="0" /></div><div class="form-field"><label>서비스 품목</label><input name="service_item" placeholder="무료 음료 1잔" /></div><div class="form-field"><label>추정 현금 가치 (원)</label><input name="estimated_cash_value" type="number" min="0" value="0" /></div><div class="form-field"><label>최소 주문 금액 (원)</label><input name="min_order_amount" type="number" min="0" value="0" /></div><div class="form-field"><label>최소 인원</label><input name="min_people" type="number" min="1" value="1" /></div><div class="form-field"><label>결제 방식</label><input name="payment_method" placeholder="예: 카드 가능" /></div><div class="form-field"><label>인증 방법</label><input name="verification_method" value="학생증 또는 모바일 학생증" /></div><div class="form-field"><label>시작일</label><input name="start_date" type="date" required /></div><div class="form-field"><label>종료일</label><input name="end_date" type="date" required /></div><div class="form-field full"><label>자격 및 메모</label><textarea name="eligibility_description" placeholder="제휴 상세 조건"></textarea></div></div><div class="form-actions"><button class="primary-button" type="submit">저장 및 승인 요청</button></div></form></div>`;
+  const form = $("#new-partnership-form");
+  const analysisPreview = $("#benefit-analysis-preview");
+  const analysisJson = $("#benefit-analysis-json");
+  form.start_date.value = new Date().toISOString().slice(0, 10);
+  form.end_date.value = new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
+  form.benefit_text.addEventListener("input", () => { form.dataset.benefitAnalysis = ""; analysisJson.textContent = ""; analysisPreview.innerHTML = ""; analysisPreview.hidden = true; });
+  form.elements.longitude.closest(".form-field")?.insertAdjacentHTML("beforeend", '<p class="helper">검색 결과를 선택하지 않으면 주소·좌표를 직접 입력할 수 있습니다.</p>');
+
+  const fillPlace = (item) => {
+    for (const key of ["category", "address", "phone", "opening_hours", "latitude", "longitude"]) if (form.elements[key] && item[key] != null) form.elements[key].value = item[key];
+    form.restaurant_name.value = item.name || form.restaurant_name.value;
+    form.restaurant_id.value = item.restaurant_id || "";
+    form.place_id.value = item.place_id || "";
+    form.place_provider.value = item.place_provider || "";
+    $("#place-search-results").innerHTML = `<p class="helper">선택됨: ${escapeHtml(item.name)} · ${escapeHtml(item.address || "주소 정보 없음")}</p>`;
+  };
+  $("#search-place").addEventListener("click", async () => {
+    const query = form.restaurant_name.value.trim();
+    if (!query) return toast("가게명을 먼저 입력해 주세요.");
+    try {
+      const data = await api(`/api/admin/places/search?q=${encodeURIComponent(query)}`);
+      const items = data.items || [];
+      $("#place-search-results").innerHTML = items.length ? items.map((item, index) => `<button type="button" class="outline-button place-result" data-index="${index}" style="text-align:left"><strong>${escapeHtml(item.name)}</strong> · ${escapeHtml(item.category)}<br /><small>${escapeHtml(item.address || "주소 정보 없음")} · ${escapeHtml(item.phone || "전화번호 없음")}</small></button>`).join("") : '<p class="helper">검색 결과가 없습니다. 주소와 좌표를 직접 입력할 수 있습니다.</p>';
+      document.querySelectorAll(".place-result").forEach((button) => button.addEventListener("click", () => fillPlace(items[Number(button.dataset.index)])));
+    } catch (error) { toast(error.message); }
+  });
+  $("#analyze-benefit").addEventListener("click", async () => {
+    const benefitText = form.benefit_text.value.trim();
+    if (!benefitText) return toast("혜택 원문을 먼저 입력해 주세요.");
+    try {
+      const result = await api("/api/admin/ai/analyze-benefit", { method: "POST", body: JSON.stringify({ benefit_text: benefitText }) });
+      const analysis = result.analysis || {};
+      form.dataset.benefitAnalysis = JSON.stringify(analysis);
+      analysisJson.textContent = JSON.stringify(analysis);
+      const rate = numericAnalysisValue(analysis.discountRate);
+      const amount = numericAnalysisValue(analysis.discountAmount);
+      form.discount_rate.value = rate;
+      form.fixed_discount.value = amount;
+      form.service_item.value = analysis.freeItem || "";
+      form.min_order_amount.value = numericAnalysisValue(analysis.minimumOrder);
+      form.min_people.value = numericAnalysisValue(analysis.requiredPeople, 1);
+      form.eligibility_description.value = (analysis.conditions || []).join(" / ");
+      if (analysis.studentVerification) form.verification_method.value = "학생증 제시";
+      form.benefit_type.value = rate ? "percentage" : amount ? "fixed" : analysis.freeItem ? "service" : "discount";
+      analysisPreview.innerHTML = renderBenefitAnalysisCard(analysis);
+      analysisPreview.hidden = false;
+    } catch (error) { toast(error.message); }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const body = Object.fromEntries(data.entries());
+    body.affiliation_ids = [...form.querySelector("[name=affiliation_ids]").selectedOptions].map((option) => Number(option.value));
+    for (const key of ["latitude", "longitude", "discount_rate", "fixed_discount", "estimated_cash_value", "min_order_amount", "min_people"]) body[key] = Number(body[key] || 0);
+    body.restaurant_id = Number(body.restaurant_id || 0) || null;
+    try { body.benefit_ai_json = form.dataset.benefitAnalysis ? JSON.parse(form.dataset.benefitAnalysis) : {}; } catch { return toast("AI 분석 결과를 다시 확인해 주세요."); }
+    try { await api("/api/admin/partnerships", { method: "POST", body: JSON.stringify(body) }); toast("제휴를 저장했습니다."); navigate("partnerships"); } catch (error) { toast(error.message); }
+  });
+}
+
 function renderImportPreview(data) {
   const rows = data.rows || [];
   $("#import-preview").innerHTML = `<p class="helper">총 ${data.total_count}행 · 유효 ${data.valid_count}행 · 오류 ${data.errors.length}행${data.ai_transformed ? " · AI 변환 완료" : ""}</p><div class="table-card admin-card"><table class="admin-table"><thead><tr><th>업체명</th><th>카테고리</th><th>주소</th><th>제휴대상</th><th>혜택 원문</th><th>기간</th><th>검증</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHtml(row.restaurant_name)}</td><td>${escapeHtml(row.category)}</td><td>${escapeHtml(row.address)}</td><td>${escapeHtml(row.target_affiliations || row.department || row.college)}</td><td>${escapeHtml(row.benefit_text)}</td><td>${row.start_date || ""} ~ ${row.end_date || ""}</td><td class="${row.errors?.length ? "preview-error" : ""}">${escapeHtml(row.errors?.join(", ") || row.warnings?.join(", ") || "정상")}</td></tr>`).join("")}</tbody></table></div>${data.valid_count ? '<button id="commit-import" class="primary-button" style="margin-top:14px">검증 통과 데이터 저장</button>' : ""}`;
@@ -256,7 +354,7 @@ async function navigate(view) {
   target.hidden = false;
   try {
     if (view === "dashboard") await showDashboard();
-    if (view === "new") showNew();
+    if (view === "new") showNewEnhanced();
     if (view === "partnerships") { await showPartnerships(); addPlaceRefreshButtons(); }
     if (view === "import") showImport();
     if (view === "reports") await showReports();

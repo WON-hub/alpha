@@ -18,13 +18,11 @@ CDI_DISTANCE_WEIGHT = 0.27
 CDI_SATISFACTION_WEIGHT = 0.20
 
 DISTANCE_BANDS = (
-    (100, 5),
-    (200, 4),
-    (400, 3),
-    (600, 2),
-    # The report omits 600-700m; use the report's 1-point band continuously
-    # through 1000m so no distance falls into an undefined interval.
-    (1000, 1),
+    (100, 100),
+    (200, 90),
+    (400, 80),
+    (600, 70),
+    (1_000, 60),
 )
 
 
@@ -194,7 +192,7 @@ def distance_score(distance_m: float) -> float:
     for upper_bound, score in DISTANCE_BANDS:
         if distance_m < upper_bound:
             return float(score)
-    return 0.0
+    return 50.0
 
 
 def bayesian_satisfaction(restaurant: Restaurant, platform_mean: float, confidence_count: int = MIN_REVIEW_COUNT) -> float:

@@ -42,7 +42,7 @@ class RecommendationRequest(BaseModel):
 class ReviewCreate(BaseModel):
     restaurant_id: int
     rating: int = Field(ge=1, le=5)
-    content: str = Field(min_length=1, max_length=1000)
+    content: str = Field(default="", max_length=1000)
     author_name: str = Field(default="익명", max_length=80)
 
 
